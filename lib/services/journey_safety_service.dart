@@ -73,21 +73,21 @@ class JourneySafetyService {
   static bool doesRouteIntersectDangerZone(
     List<LatLng> route,
     List<UnsafeZone> dangerZones, {
-    double bufferMeters = defaultActualZoneRadiusMeters,
+    double bufferMeters = 0,
+    double actualZoneRadiusMeters = defaultActualZoneRadiusMeters,
   }) {
     if (route.length < 2 || dangerZones.isEmpty) {
       return false;
     }
 
     for (final zone in dangerZones) {
-      final actualZoneRadius = defaultActualZoneRadiusMeters;
       for (var index = 0; index < route.length - 1; index++) {
         final distance = distanceToSegmentMeters(
           zone.point,
           route[index],
           route[index + 1],
         );
-        if (distance <= actualZoneRadius + bufferMeters) {
+        if (distance <= actualZoneRadiusMeters + max(0.0, bufferMeters)) {
           return true;
         }
       }
@@ -244,9 +244,11 @@ class JourneySafetyService {
         dangerZones,
         actualZoneRadiusMeters: actualZoneRadiusMeters,
       );
+      final distanceMeters = calculateRouteDistance(candidate.route);
+      final durationSeconds = calculateRouteEta(candidate.route);
       final detourRatio = calculateDetourRatio(candidate.route, baseline);
       final etaRatio = calculateRouteEta(baseline) > 0
-          ? calculateRouteEta(candidate.route) / calculateRouteEta(baseline)
+          ? durationSeconds / calculateRouteEta(baseline)
           : 1.0;
 
       var distancePenalty = max(0.0, (detourRatio - 1.05) * 90);
@@ -265,15 +267,15 @@ class JourneySafetyService {
           etaPenalty +
           candidate.risk.score * 0.6;
 
-      return (
+      return _EvaluatedJourneyCandidate(
         candidate: candidate,
         danger: danger,
+        distanceMeters: distanceMeters,
+        durationSeconds: durationSeconds,
         detourRatio: detourRatio,
         extraMinutes: max(
           0,
-          ((calculateRouteEta(candidate.route) - calculateRouteEta(baseline)) /
-                  60)
-              .ceil(),
+          ((durationSeconds - calculateRouteEta(baseline)) / 60).ceil(),
         ),
         totalScore: totalScore,
       );
@@ -282,10 +284,59 @@ class JourneySafetyService {
     final nonIntersecting = evaluated
         .where((item) => !item.danger.intersectsActualZone)
         .toList();
-    final viablePool = nonIntersecting.isNotEmpty ? nonIntersecting : evaluated;
+    late final _EvaluatedJourneyCandidate chosen;
+    if (nonIntersecting.isNotEmpty) {
+      nonIntersecting.sort(_compareByShortestRoute);
+      final shortestSafe = nonIntersecting.first;
+      final practicalSafePool = nonIntersecting
+          .where(
+            (item) => _isPracticalSafeAlternative(
+              item,
+              shortestSafe,
+              maxDetourRatio: maxDetourRatio,
+            ),
+          )
+          .toList();
 
-    viablePool.sort((a, b) => a.totalScore.compareTo(b.totalScore));
-    final chosen = viablePool.first;
+      practicalSafePool.sort((a, b) {
+        final bufferCompare = a.danger.bufferIntrusionCount.compareTo(
+          b.danger.bufferIntrusionCount,
+        );
+        if (bufferCompare != 0) {
+          return bufferCompare;
+        }
+
+        final distanceDeltaMeters = (a.distanceMeters - b.distanceMeters).abs();
+        if (distanceDeltaMeters > 45) {
+          final shortestCompare = _compareByShortestRoute(a, b);
+          if (shortestCompare != 0) {
+            return shortestCompare;
+          }
+        }
+
+        final riskCompare = a.candidate.risk.score.compareTo(
+          b.candidate.risk.score,
+        );
+        if (riskCompare != 0) {
+          return riskCompare;
+        }
+
+        return b.danger.nearestDangerDistanceMeters.compareTo(
+          a.danger.nearestDangerDistanceMeters,
+        );
+      });
+
+      chosen = practicalSafePool.first;
+    } else {
+      evaluated.sort((a, b) {
+        final totalCompare = a.totalScore.compareTo(b.totalScore);
+        if (totalCompare != 0) {
+          return totalCompare;
+        }
+        return _compareByShortestRoute(a, b);
+      });
+      chosen = evaluated.first;
+    }
 
     String? warningMessage;
     final excessiveDetour = chosen.detourRatio > maxDetourRatio;
@@ -483,6 +534,45 @@ class JourneySafetyService {
     }
     return 0.7;
   }
+
+  static bool _isPracticalSafeAlternative(
+    _EvaluatedJourneyCandidate candidate,
+    _EvaluatedJourneyCandidate shortestSafe, {
+    required double maxDetourRatio,
+  }) {
+    final baselineDistance = max(shortestSafe.distanceMeters, 1.0);
+    final baselineDuration = max(shortestSafe.durationSeconds, 1.0);
+    final distanceRatio = candidate.distanceMeters / baselineDistance;
+    final durationRatio = candidate.durationSeconds / baselineDuration;
+    final distanceDeltaMeters = candidate.distanceMeters - shortestSafe.distanceMeters;
+    final durationDeltaSeconds =
+        candidate.durationSeconds - shortestSafe.durationSeconds;
+
+    final allowedDistanceRatio = min(maxDetourRatio, 1.12);
+    final distanceCloseEnough =
+        distanceRatio <= allowedDistanceRatio || distanceDeltaMeters <= 120;
+    final durationCloseEnough =
+        durationRatio <= 1.15 || durationDeltaSeconds <= 90;
+
+    return distanceCloseEnough && durationCloseEnough;
+  }
+
+  static int _compareByShortestRoute(
+    _EvaluatedJourneyCandidate a,
+    _EvaluatedJourneyCandidate b,
+  ) {
+    final distanceCompare = a.distanceMeters.compareTo(b.distanceMeters);
+    if (distanceCompare != 0) {
+      return distanceCompare;
+    }
+
+    final durationCompare = a.durationSeconds.compareTo(b.durationSeconds);
+    if (durationCompare != 0) {
+      return durationCompare;
+    }
+
+    return a.candidate.risk.score.compareTo(b.candidate.risk.score);
+  }
 }
 
 class _DangerPenaltyResult {
@@ -499,4 +589,24 @@ class _DangerPenaltyResult {
   final bool intersectsActualZone;
   final int nearbyDangerCount;
   final int bufferIntrusionCount;
+}
+
+class _EvaluatedJourneyCandidate {
+  const _EvaluatedJourneyCandidate({
+    required this.candidate,
+    required this.danger,
+    required this.distanceMeters,
+    required this.durationSeconds,
+    required this.detourRatio,
+    required this.extraMinutes,
+    required this.totalScore,
+  });
+
+  final JourneySafetyCandidate candidate;
+  final _DangerPenaltyResult danger;
+  final double distanceMeters;
+  final double durationSeconds;
+  final double detourRatio;
+  final int extraMinutes;
+  final double totalScore;
 }

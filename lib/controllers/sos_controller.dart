@@ -12,6 +12,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'contact_controller.dart';
 import 'history_controller.dart';
 import 'rescue_invite_controller.dart';
@@ -38,6 +39,7 @@ class SosController extends GetxController {
   static const String _voiceSosPrefsKey = 'is_voice_sos_active';
   static const String _voiceStatusPrefsKey = 'voice_sos_status';
   static const String _recordingStatusPrefsKey = 'sos_recording_status';
+  static const String _recordingPathPrefsKey = 'sos_recording_path';
   static const String _recordingPublicPathPrefsKey =
       'sos_recording_public_path';
   static const String _recordingActivePrefsKey = 'sos_recording_active';
@@ -60,6 +62,7 @@ class SosController extends GetxController {
   var voiceStatusMessage = 'Voice SOS disabled'.obs;
   var isEmergencyRecording = false.obs;
   var recordingStatusMessage = ''.obs;
+  var lastRecordingPrivatePath = ''.obs;
   var lastRecordingPublicPath = ''.obs;
   var smsStatusMessage = 'SOS idle'.obs;
   var smsRetryStatus = ''.obs;
@@ -92,8 +95,13 @@ class SosController extends GetxController {
           final data = Map<String, dynamic>.from(event ?? const {});
           recordingStatusMessage.value = data['status']?.toString() ?? '';
           isEmergencyRecording.value = data['isActive'] == true;
-          lastRecordingPublicPath.value =
-              data['publicPath']?.toString() ?? lastRecordingPublicPath.value;
+          if (data.containsKey('path')) {
+            lastRecordingPrivatePath.value = data['path']?.toString() ?? '';
+          }
+          if (data.containsKey('publicPath')) {
+            lastRecordingPublicPath.value =
+                data['publicPath']?.toString() ?? '';
+          }
         });
     FlutterBackgroundService().on('sos_triggered').listen((event) async {
       if (!isCountdown.value && !isSent.value) {
@@ -122,6 +130,8 @@ class SosController extends GetxController {
         prefs.getString(_voiceStatusPrefsKey) ?? 'Voice SOS disabled';
     recordingStatusMessage.value =
         prefs.getString(_recordingStatusPrefsKey) ?? '';
+    lastRecordingPrivatePath.value =
+        prefs.getString(_recordingPathPrefsKey) ?? '';
     lastRecordingPublicPath.value =
         prefs.getString(_recordingPublicPathPrefsKey) ?? '';
     generatedMessage = prefs.getString('sos_msg') ?? '';
@@ -1151,6 +1161,99 @@ class SosController extends GetxController {
     }
   }
 
+  String get lastRecordingDisplayPath {
+    final publicPath = lastRecordingPublicPath.value.trim();
+    if (publicPath.isNotEmpty) {
+      return publicPath;
+    }
+    return lastRecordingPrivatePath.value.trim();
+  }
+
+  bool get hasLastRecording => lastRecordingDisplayPath.isNotEmpty;
+
+  bool get isLastRecordingPrivateOnly =>
+      lastRecordingPublicPath.value.trim().isEmpty &&
+      lastRecordingPrivatePath.value.trim().isNotEmpty;
+
+  Future<void> copyLastRecordingPath() async {
+    final path = lastRecordingDisplayPath;
+    if (path.isEmpty) {
+      Get.snackbar(
+        'No Recording',
+        'No recording available.',
+        snackPosition: SnackPosition.BOTTOM,
+      );
+      return;
+    }
+
+    await Clipboard.setData(ClipboardData(text: path));
+    Get.snackbar(
+      'Path Copied',
+      'Recording path copied to clipboard.',
+      snackPosition: SnackPosition.BOTTOM,
+    );
+  }
+
+  Future<void> openLastRecordingFile() async {
+    final filePath = await _resolveAccessibleRecordingPath();
+    if (filePath == null) {
+      _showRecordingUnavailableMessage();
+      return;
+    }
+
+    try {
+      if (Platform.isAndroid) {
+        final response = await _smsChannel.invokeMethod<Map<dynamic, dynamic>>(
+          'openFile',
+          {'path': filePath},
+        );
+        final data = Map<String, dynamic>.from(response ?? const {});
+        if (data['success'] == true) {
+          return;
+        }
+        throw Exception(
+          data['errorMessage']?.toString() ?? 'Unable to open recording file.',
+        );
+      }
+
+      final opened = await launchUrl(
+        Uri.file(filePath),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) {
+        throw Exception('Unable to open recording file.');
+      }
+    } catch (e) {
+      Get.snackbar(
+        'Open Failed',
+        e.toString().replaceFirst('Exception: ', ''),
+        snackPosition: SnackPosition.BOTTOM,
+      );
+    }
+  }
+
+  Future<void> shareLastRecordingFile() async {
+    final filePath = await _resolveAccessibleRecordingPath();
+    if (filePath == null) {
+      _showRecordingUnavailableMessage();
+      return;
+    }
+
+    try {
+      await Share.shareXFiles(
+        [XFile(filePath)],
+        subject: 'SafeRoute SOS Recording',
+        text: 'SOS audio recording',
+      );
+    } catch (e) {
+      Get.snackbar(
+        'Share Failed',
+        e.toString().replaceFirst('Exception: ', ''),
+        snackPosition: SnackPosition.BOTTOM,
+      );
+    }
+  }
+
   Future<void> shareSOS() async {
     if (generatedMessage.isNotEmpty) {
       await Share.share(generatedMessage, subject: "URGENT SOS");
@@ -1341,6 +1444,40 @@ class SosController extends GetxController {
     }
 
     return null;
+  }
+
+  Future<String?> _resolveAccessibleRecordingPath() async {
+    final candidates = <String>[
+      lastRecordingPrivatePath.value.trim(),
+      if (_isAbsolutePath(lastRecordingPublicPath.value.trim()))
+        lastRecordingPublicPath.value.trim(),
+    ].where((path) => path.isNotEmpty);
+
+    for (final path in candidates) {
+      if (await File(path).exists()) {
+        return path;
+      }
+    }
+
+    return null;
+  }
+
+  bool _isAbsolutePath(String path) {
+    if (path.isEmpty) {
+      return false;
+    }
+    return path.startsWith('/') || RegExp(r'^[A-Za-z]:\\').hasMatch(path);
+  }
+
+  void _showRecordingUnavailableMessage() {
+    final hasDisplayPath = lastRecordingDisplayPath.isNotEmpty;
+    Get.snackbar(
+      'Recording Unavailable',
+      hasDisplayPath
+          ? 'Recording path is saved, but the file is not available on this device.'
+          : 'No recording available.',
+      snackPosition: SnackPosition.BOTTOM,
+    );
   }
 }
 

@@ -24,6 +24,16 @@
         android:label="safe_route"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/safe_route_file_paths" />
+        </provider>
         
         <service
             android:name="id.flutter.flutter_background_service.BackgroundService"

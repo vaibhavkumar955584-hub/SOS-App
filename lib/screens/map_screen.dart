@@ -52,9 +52,10 @@ class _MapScreenState extends State<MapScreen> {
       Get.isRegistered<HeatmapController>()
       ? Get.find<HeatmapController>()
       : Get.put(HeatmapController(), permanent: true);
-  final SosHeatmapController _sosHeatmapController = Get.put(
-    SosHeatmapController(),
-  );
+  final SosHeatmapController _sosHeatmapController =
+      Get.isRegistered<SosHeatmapController>()
+      ? Get.find<SosHeatmapController>()
+      : Get.put(SosHeatmapController());
   late final RiskController _riskController = RiskController.instance;
 
   Position? _currentPosition;
@@ -937,90 +938,88 @@ class _MapScreenState extends State<MapScreen> {
         elevation: 0,
         backgroundColor: Theme.of(context).colorScheme.primaryContainer,
         actions: [
-          Obx(
-            () => Row(
-              children: [
-                Tooltip(
-                  message: 'Open Safety Controls',
-                  child: IconButton(
-                    onPressed: _showSafetyControlsSheet,
-                    icon: const Icon(Icons.tune_rounded),
-                    visualDensity: VisualDensity.compact,
+          Row(
+            children: [
+              Tooltip(
+                message: 'Open Safety Controls',
+                child: IconButton(
+                  onPressed: _showSafetyControlsSheet,
+                  icon: const Icon(Icons.tune_rounded),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+              Tooltip(
+                message:
+                    'Automatically monitors your journey and can trigger SOS if high-risk deviation is detected.',
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: _TopBarStatusChip(
+                    label: _isJourneyActive
+                        ? 'Guard Active'
+                        : _isJourneyGuardEnabled
+                        ? 'Guard Ready'
+                        : 'Guard Off',
+                    icon: _isJourneyActive
+                        ? Icons.shield
+                        : Icons.shield_outlined,
+                    accentColor: _isJourneyActive
+                        ? Colors.greenAccent
+                        : _isJourneyGuardEnabled
+                        ? Colors.amber
+                        : Colors.white70,
+                    isEnabled: _isJourneyGuardEnabled,
+                    onTap: () =>
+                        _handleJourneyGuardToggle(!_isJourneyGuardEnabled),
                   ),
                 ),
-                Tooltip(
-                  message:
-                      'Automatically monitors your journey and can trigger SOS if high-risk deviation is detected.',
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 4),
-                    child: _TopBarStatusChip(
-                      label: _isJourneyActive
-                          ? 'Guard Active'
-                          : _isJourneyGuardEnabled
-                          ? 'Guard Ready'
-                          : 'Guard Off',
-                      icon: _isJourneyActive
-                          ? Icons.shield
-                          : Icons.shield_outlined,
-                      accentColor: _isJourneyActive
-                          ? Colors.greenAccent
-                          : _isJourneyGuardEnabled
-                          ? Colors.amber
-                          : Colors.white70,
-                      isEnabled: _isJourneyGuardEnabled,
-                      onTap: () =>
-                          _handleJourneyGuardToggle(!_isJourneyGuardEnabled),
+              ),
+              PopupMenuButton<_AppMenuAction>(
+                icon: const Icon(Icons.more_vert),
+                onSelected: _handleMenuAction,
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
+                    value: _AppMenuAction.emergencyContacts,
+                    child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.contact_phone_outlined),
+                      title: Text('Emergency Contacts'),
                     ),
                   ),
-                ),
-                PopupMenuButton<_AppMenuAction>(
-                  icon: const Icon(Icons.more_vert),
-                  onSelected: _handleMenuAction,
-                  itemBuilder: (context) => const [
-                    PopupMenuItem(
-                      value: _AppMenuAction.emergencyContacts,
-                      child: ListTile(
-                        dense: true,
-                        leading: Icon(Icons.contact_phone_outlined),
-                        title: Text('Emergency Contacts'),
-                      ),
+                  PopupMenuItem(
+                    value: _AppMenuAction.sosTimer,
+                    child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.timer_outlined),
+                      title: Text('SOS Timer'),
                     ),
-                    PopupMenuItem(
-                      value: _AppMenuAction.sosTimer,
-                      child: ListTile(
-                        dense: true,
-                        leading: Icon(Icons.timer_outlined),
-                        title: Text('SOS Timer'),
-                      ),
+                  ),
+                  PopupMenuItem(
+                    value: _AppMenuAction.editProfile,
+                    child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.person_outline),
+                      title: Text('Edit Profile'),
                     ),
-                    PopupMenuItem(
-                      value: _AppMenuAction.editProfile,
-                      child: ListTile(
-                        dense: true,
-                        leading: Icon(Icons.person_outline),
-                        title: Text('Edit Profile'),
-                      ),
+                  ),
+                  PopupMenuItem(
+                    value: _AppMenuAction.history,
+                    child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.history),
+                      title: Text('History'),
                     ),
-                    PopupMenuItem(
-                      value: _AppMenuAction.history,
-                      child: ListTile(
-                        dense: true,
-                        leading: Icon(Icons.history),
-                        title: Text('History'),
-                      ),
+                  ),
+                  PopupMenuItem(
+                    value: _AppMenuAction.logout,
+                    child: ListTile(
+                      dense: true,
+                      leading: Icon(Icons.logout),
+                      title: Text('Logout'),
                     ),
-                    PopupMenuItem(
-                      value: _AppMenuAction.logout,
-                      child: ListTile(
-                        dense: true,
-                        leading: Icon(Icons.logout),
-                        title: Text('Logout'),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
+                  ),
+                ],
+              ),
+            ],
           ),
         ],
       ),
@@ -1310,9 +1309,12 @@ class _MapScreenState extends State<MapScreen> {
             right: 16,
             child: Obx(() {
               final stats = RescueStatsController.instance;
+              final totalCount = stats.totalRescues.value;
               final personalCount = stats.personalHelpedRescues.value;
               return _RescueStatsBanner(
-                totalLabel: stats.totalRescuesLabel,
+                totalLabel: totalCount >= 100
+                    ? 'Trusted by $totalCount+ successful rescues'
+                    : '$totalCount+ Rescues Completed',
                 personalLabel: personalCount > 0
                     ? 'You helped in $personalCount rescues'
                     : null,
@@ -1921,39 +1923,56 @@ class _MapScreenState extends State<MapScreen> {
     );
 
     if (visibleUnsafeZones.isNotEmpty) {
-      for (final zone in visibleUnsafeZones) {
-        final baseZoneDistance = _distanceToPolylineMeters(
-          zone.point,
-          baseRoute.points,
-        );
-        final zoneInfluenceDistance =
-            _unsafeZoneRadiusMeters +
-            JourneySafetyService.getAdaptiveDangerBufferForZone(zone) +
-            120;
-        if (baseZoneDistance > zoneInfluenceDistance) {
+      final seedRoutes = baseRoutes.isNotEmpty ? baseRoutes : [baseRoute];
+      for (final seedRoute in seedRoutes) {
+        if (seedRoute.points.isEmpty) {
           continue;
         }
 
-        final detours = _buildDetourWaypointsForZone(baseRoute.points, zone);
-        for (final waypoint in detours) {
-          final reroutedRoutes = await RoutingService.getAlternativeRoutes(
-            start,
-            destination,
-            viaPoints: [waypoint],
-            maxAlternatives: 2,
+        for (final zone in visibleUnsafeZones) {
+          final routeIntersectsZone =
+              JourneySafetyService.doesRouteIntersectDangerZone(
+                seedRoute.points,
+                [zone],
+                actualZoneRadiusMeters: _unsafeZoneRadiusMeters,
+              );
+          final routeZoneDistance = _distanceToPolylineMeters(
+            zone.point,
+            seedRoute.points,
           );
-          if (reroutedRoutes.isEmpty) {
+          final zoneInfluenceDistance =
+              _unsafeZoneRadiusMeters +
+              JourneySafetyService.getAdaptiveDangerBufferForZone(zone) +
+              120;
+          if (!routeIntersectsZone &&
+              routeZoneDistance > zoneInfluenceDistance) {
             continue;
           }
 
-          _addJourneyCandidates(
-            candidateRoutes: candidateRoutes,
-            uniqueCandidateKeys: uniqueCandidateKeys,
-            routes: reroutedRoutes,
-            visibleUnsafeZones: visibleUnsafeZones,
-            userLocation: start,
-            viaPoints: [waypoint],
+          final detourWaypointSets = _buildDetourWaypointSetsForZone(
+            seedRoute.points,
+            zone,
           );
+          for (final viaPoints in detourWaypointSets) {
+            final reroutedRoutes = await RoutingService.getAlternativeRoutes(
+              start,
+              destination,
+              viaPoints: viaPoints,
+              maxAlternatives: 2,
+            );
+            if (reroutedRoutes.isEmpty) {
+              continue;
+            }
+
+            _addJourneyCandidates(
+              candidateRoutes: candidateRoutes,
+              uniqueCandidateKeys: uniqueCandidateKeys,
+              routes: reroutedRoutes,
+              visibleUnsafeZones: visibleUnsafeZones,
+              userLocation: start,
+              viaPoints: viaPoints,
+            );
+          }
         }
       }
     }
@@ -1974,12 +1993,12 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  List<LatLng> _buildDetourWaypointsForZone(
+  List<List<LatLng>> _buildDetourWaypointSetsForZone(
     List<LatLng> routePoints,
     UnsafeZone zone,
   ) {
     if (routePoints.length < 2) {
-      return const <LatLng>[];
+      return const <List<LatLng>>[];
     }
 
     final zoneCenter = zone.point;
@@ -2004,38 +2023,72 @@ class _MapScreenState extends State<MapScreen> {
     final dy = bestEnd.latitude - bestStart.latitude;
     final length = sqrt(dx * dx + dy * dy);
     if (length == 0) {
-      return const <LatLng>[];
+      return const <List<LatLng>>[];
     }
 
-    final perpendicularX = -dy / length;
-    final perpendicularY = dx / length;
-    final baseOffsetMeters =
-        _unsafeZoneRadiusMeters +
+    final tangentX = dx / length;
+    final tangentY = dy / length;
+    final perpendicularX = -tangentY;
+    final perpendicularY = tangentX;
+    final adaptiveBuffer =
         JourneySafetyService.getAdaptiveDangerBufferForZone(zone);
-    final waypointOptions = <LatLng>[];
+    final lateralOffsetMeters =
+        _unsafeZoneRadiusMeters + max(35.0, min(110.0, adaptiveBuffer * 0.45));
+    final longitudinalSweepMeters =
+        lateralOffsetMeters + max(45.0, _unsafeZoneRadiusMeters * 0.35);
+    final waypointSets = <List<LatLng>>[];
+    final uniqueKeys = <String>{};
 
-    for (final scale in [1.0, 0.8, 0.65]) {
-      final offsetMeters = baseOffsetMeters * scale;
-      final latOffset = (perpendicularY * offsetMeters) / 111320.0;
+    LatLng offsetPoint({
+      required double lateralMeters,
+      required double longitudinalMeters,
+    }) {
+      final avgLat = zoneCenter.latitude * pi / 180;
+      final metersPerLng = 111320.0 * cos(avgLat).clamp(0.2, double.infinity);
+      final latOffset =
+          ((perpendicularY * lateralMeters) + (tangentY * longitudinalMeters)) /
+          111320.0;
       final lngOffset =
-          (perpendicularX * offsetMeters) /
-          (111320.0 *
-              cos(zoneCenter.latitude * pi / 180).clamp(0.2, double.infinity));
-      waypointOptions.add(
-        LatLng(
-          zoneCenter.latitude + latOffset,
-          zoneCenter.longitude + lngOffset,
-        ),
-      );
-      waypointOptions.add(
-        LatLng(
-          zoneCenter.latitude - latOffset,
-          zoneCenter.longitude - lngOffset,
-        ),
+          ((perpendicularX * lateralMeters) + (tangentX * longitudinalMeters)) /
+          metersPerLng;
+      return LatLng(
+        zoneCenter.latitude + latOffset,
+        zoneCenter.longitude + lngOffset,
       );
     }
 
-    return waypointOptions;
+    for (final side in [-1.0, 1.0]) {
+      final midpoint = offsetPoint(
+        lateralMeters: lateralOffsetMeters * side,
+        longitudinalMeters: 0,
+      );
+      final entry = offsetPoint(
+        lateralMeters: lateralOffsetMeters * side,
+        longitudinalMeters: -longitudinalSweepMeters,
+      );
+      final exit = offsetPoint(
+        lateralMeters: lateralOffsetMeters * side,
+        longitudinalMeters: longitudinalSweepMeters,
+      );
+
+      for (final candidate in [
+        <LatLng>[midpoint],
+        <LatLng>[entry, exit],
+        <LatLng>[entry, midpoint, exit],
+      ]) {
+        final key = candidate
+            .map(
+              (point) =>
+                  '${point.latitude.toStringAsFixed(5)},${point.longitude.toStringAsFixed(5)}',
+            )
+            .join('|');
+        if (uniqueKeys.add(key)) {
+          waypointSets.add(candidate);
+        }
+      }
+    }
+
+    return waypointSets;
   }
 
   void _addJourneyCandidates({

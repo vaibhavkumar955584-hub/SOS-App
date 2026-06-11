@@ -5,6 +5,7 @@ import 'package:get/get.dart';
 import '../controllers/auth_controller.dart';
 import '../controllers/contact_controller.dart';
 import '../controllers/history_controller.dart';
+import '../controllers/sos_controller.dart';
 import '../controllers/sos_settings_controller.dart';
 
 class EmergencyContactsScreen extends StatefulWidget {
@@ -358,6 +359,7 @@ class HistoryScreen extends StatelessWidget {
   HistoryScreen({super.key});
 
   final HistoryController _history = HistoryController.instanceOrCreate();
+  final SosController _sosController = SosController.instanceOrCreate();
 
   @override
   Widget build(BuildContext context) {
@@ -404,6 +406,8 @@ class HistoryScreen extends StatelessWidget {
                 ),
                 onChanged: (value) => _history.query.value = value,
               ),
+              const SizedBox(height: 16),
+              _LastSosRecordingCard(controller: _sosController),
               const SizedBox(height: 16),
               if (filtered.isEmpty)
                 const Padding(
@@ -456,6 +460,111 @@ class HistoryScreen extends StatelessWidget {
       default:
         return Colors.grey;
     }
+  }
+}
+
+class _LastSosRecordingCard extends StatelessWidget {
+  const _LastSosRecordingCard({required this.controller});
+
+  final SosController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      final displayPath = controller.lastRecordingDisplayPath;
+      final hasRecording = controller.hasLastRecording;
+      final isPrivateOnly = controller.isLastRecordingPrivateOnly;
+
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    backgroundColor: Colors.red.withOpacity(0.12),
+                    child: const Icon(Icons.audio_file_outlined, color: Colors.red),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Last SOS Recording',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              if (!hasRecording)
+                Text(
+                  'No recording available',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                )
+              else ...[
+                if (isPrivateOnly)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      'Recording saved privately',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context)
+                        .colorScheme
+                        .surfaceContainerHighest
+                        .withOpacity(0.45),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: SelectableText(
+                    displayPath,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () => controller.copyLastRecordingPath(),
+                      icon: const Icon(Icons.copy_all_outlined),
+                      label: const Text('Copy Path'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: () => controller.openLastRecordingFile(),
+                      icon: const Icon(Icons.open_in_new),
+                      label: const Text('Open File'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: () => controller.shareLastRecordingFile(),
+                      icon: const Icon(Icons.share_outlined),
+                      label: const Text('Share Recording'),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+    });
   }
 }
 

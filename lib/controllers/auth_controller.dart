@@ -9,7 +9,7 @@ import 'contact_controller.dart';
 import 'rescue_invite_controller.dart';
 
 class AuthController extends GetxController {
-  static AuthController instance = Get.find();
+  static AuthController get instance => Get.find<AuthController>();
 
   late Rx<User?> _user;
   FirebaseAuth auth = FirebaseAuth.instance;

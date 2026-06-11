@@ -13,7 +13,10 @@ class UnsafeAreaMapScreen extends StatefulWidget {
 }
 
 class _UnsafeAreaMapScreenState extends State<UnsafeAreaMapScreen> {
-  final SosHeatmapController _heatmapController = Get.put(SosHeatmapController());
+  final SosHeatmapController _heatmapController =
+      Get.isRegistered<SosHeatmapController>()
+      ? Get.find<SosHeatmapController>()
+      : Get.put(SosHeatmapController());
 
   @override
   Widget build(BuildContext context) {

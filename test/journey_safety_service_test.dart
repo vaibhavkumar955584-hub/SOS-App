@@ -32,6 +32,33 @@ void main() {
       },
     );
 
+    test(
+      'doesRouteIntersectDangerZone uses actual unsafe radius by default',
+      () {
+        final routeOutsideCircle = [
+          const LatLng(28.61560, 77.20880),
+          const LatLng(28.61560, 77.20930),
+        ];
+
+        expect(
+          JourneySafetyService.doesRouteIntersectDangerZone(
+            routeOutsideCircle,
+            [zone],
+          ),
+          isFalse,
+        );
+
+        expect(
+          JourneySafetyService.doesRouteIntersectDangerZone(
+            routeOutsideCircle,
+            [zone],
+            bufferMeters: 80,
+          ),
+          isTrue,
+        );
+      },
+    );
+
     test('calculateRouteRisk increases for intersecting routes', () {
       final riskyRoute = [
         const LatLng(28.6137, 77.2088),
@@ -130,6 +157,68 @@ void main() {
       expect(safest!.candidate.route.distanceMeters, 1200);
       expect(safest.warningMessage, contains('Safer route'));
     });
+
+    test(
+      'selectBalancedSafeRoute prefers the shortest practical non-intersecting route',
+      () {
+        final candidates = [
+          JourneySafetyCandidate(
+            route: const RouteSummary(
+              points: [LatLng(28.6137, 77.2088), LatLng(28.6142, 77.2093)],
+              distanceMeters: 1000,
+              durationSeconds: 180,
+            ),
+            risk: const JourneyRiskResult(
+              score: 88,
+              nearestDangerDistanceMeters: 12,
+              nearbyDangerCount: 1,
+              intersectsDangerZone: true,
+            ),
+            viaPoints: const [],
+          ),
+          JourneySafetyCandidate(
+            route: const RouteSummary(
+              points: [LatLng(28.6124, 77.2057), LatLng(28.6129, 77.2064)],
+              distanceMeters: 1180,
+              durationSeconds: 230,
+            ),
+            risk: const JourneyRiskResult(
+              score: 34,
+              nearestDangerDistanceMeters: 180,
+              nearbyDangerCount: 1,
+              intersectsDangerZone: false,
+              bufferIntrusionCount: 0,
+              dangerPenalty: 24,
+            ),
+            viaPoints: const [],
+          ),
+          JourneySafetyCandidate(
+            route: const RouteSummary(
+              points: [LatLng(28.6110, 77.2040), LatLng(28.6165, 77.2140)],
+              distanceMeters: 1560,
+              durationSeconds: 300,
+            ),
+            risk: const JourneyRiskResult(
+              score: 8,
+              nearestDangerDistanceMeters: 720,
+              nearbyDangerCount: 0,
+              intersectsDangerZone: false,
+              bufferIntrusionCount: 0,
+              dangerPenalty: 0,
+            ),
+            viaPoints: const [],
+          ),
+        ];
+
+        final safest = JourneySafetyService.selectBalancedSafeRoute(candidates, [
+          zone,
+        ]);
+
+        expect(safest, isNotNull);
+        expect(safest!.candidate.route.distanceMeters, 1180);
+        expect(safest.isFallbackLowestRisk, isFalse);
+      },
+    );
 
     test(
       'calculateDangerZonePenalty heavily penalizes actual zone crossing',

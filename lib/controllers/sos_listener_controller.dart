@@ -12,7 +12,7 @@ import '../screens/map_screen.dart';
 class SosListenerController extends GetxController {
   static const int _sosFreshnessWindowMs = 15 * 60 * 1000;
   static const int maxResponders = 6;
-  static SosListenerController instance = Get.find();
+  static SosListenerController get instance => Get.find<SosListenerController>();
 
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;

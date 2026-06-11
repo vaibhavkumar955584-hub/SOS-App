@@ -1,5 +1,6 @@
 package com.example.safe_route
 
+import com.example.safe_route.BuildConfig
 import android.Manifest
 import android.app.Activity
 import android.app.PendingIntent
@@ -20,6 +21,7 @@ import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
 import android.view.WindowManager
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -102,6 +104,21 @@ class MainActivity : FlutterActivity() {
                     }
 
                     result.success(saveRecordingToDownloads(sourcePath, displayName))
+                }
+
+                "openFile" -> {
+                    val path = call.argument<String>("path")
+                    if (path.isNullOrBlank()) {
+                        result.success(
+                            mapOf(
+                                "success" to false,
+                                "errorMessage" to "Missing file path.",
+                            ),
+                        )
+                        return@setMethodCallHandler
+                    }
+
+                    result.success(openFile(path))
                 }
 
                 else -> result.notImplemented()
@@ -373,6 +390,49 @@ class MainActivity : FlutterActivity() {
             mapOf(
                 "success" to false,
                 "errorMessage" to (e.message ?: "Failed to save recording to Downloads."),
+            )
+        }
+    }
+
+    private fun openFile(path: String): Map<String, Any?> {
+        return try {
+            val file = File(path)
+            if (!file.exists()) {
+                return mapOf(
+                    "success" to false,
+                    "errorMessage" to "Recording file not found.",
+                )
+            }
+
+            val uri =
+                FileProvider.getUriForFile(
+                    this,
+                    "${BuildConfig.APPLICATION_ID}.fileprovider",
+                    file,
+                )
+            val mimeType = contentResolver.getType(uri) ?: "audio/*"
+            val intent =
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, mimeType)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+
+            if (intent.resolveActivity(packageManager) == null) {
+                return mapOf(
+                    "success" to false,
+                    "errorMessage" to "No app is available to open this recording.",
+                )
+            }
+
+            val chooser = Intent.createChooser(intent, "Open SOS Recording")
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(chooser)
+            mapOf("success" to true)
+        } catch (e: Exception) {
+            mapOf(
+                "success" to false,
+                "errorMessage" to (e.message ?: "Unable to open recording file."),
             )
         }
     }
