@@ -39,9 +39,10 @@ class RescueInviteController extends GetxController {
   }
 
   Future<Uri?> createActiveRescueInviteUri({String? sessionId}) async {
-    final resolvedSessionId =
-        sessionId ?? SosListenerController.instance.activeSosUid.value;
     final currentUser = _auth.currentUser;
+    final resolvedSessionId = sessionId ??
+        SosListenerController.instance.activeSosUid.value ??
+        (currentUser != null ? currentUser.uid : null);
     if (resolvedSessionId == null || currentUser == null) {
       return null;
     }
@@ -76,12 +77,12 @@ class RescueInviteController extends GetxController {
     );
   }
 
-  Future<void> shareActiveRescueInvite() async {
-    final uri = await createActiveRescueInviteUri();
+  Future<void> shareActiveRescueInvite({String? sessionId}) async {
+    final uri = await createActiveRescueInviteUri(sessionId: sessionId);
     if (uri == null) {
       Get.snackbar(
         'No Active Rescue',
-        'You can share a rescue link only while assisting an active SOS.',
+        'You can share a rescue link only while participating in an active SOS session.',
         snackPosition: SnackPosition.BOTTOM,
       );
       return;

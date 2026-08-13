@@ -169,6 +169,7 @@ class _JoinRescueInviteScreenState extends State<JoinRescueInviteScreen> {
     });
 
     if (result.success) {
+      Get.until((route) => route.isFirst);
       Get.snackbar(
         'Rescue Joined',
         'You are now helping in this SOS session.',

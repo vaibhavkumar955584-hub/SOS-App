@@ -80,14 +80,20 @@ class JourneySafetyService {
       return false;
     }
 
+    final routeBounds = _calculateRouteBounds(route);
+    final threshold = actualZoneRadiusMeters + max(0.0, bufferMeters);
+
     for (final zone in dangerZones) {
+      if (!_isZoneNearRouteBounds(zone.point, routeBounds, threshold)) {
+        continue;
+      }
       for (var index = 0; index < route.length - 1; index++) {
         final distance = distanceToSegmentMeters(
           zone.point,
           route[index],
           route[index + 1],
         );
-        if (distance <= actualZoneRadiusMeters + max(0.0, bufferMeters)) {
+        if (distance <= threshold) {
           return true;
         }
       }
@@ -439,6 +445,7 @@ class JourneySafetyService {
       );
     }
 
+    final routeBounds = _calculateRouteBounds(route);
     var penalty = 0.0;
     var nearestDangerDistance = double.infinity;
     var intersectsActualZone = false;
@@ -446,11 +453,18 @@ class JourneySafetyService {
     var bufferIntrusionCount = 0;
 
     for (final zone in dangerZones) {
-      final zoneNearest = _nearestDistanceToRoute(route, zone.point);
       final severity = _severityForZone(zone);
       final adaptiveBuffer =
           explicitBufferMeters ?? getAdaptiveDangerBuffer(severity);
       final outerBuffer = actualZoneRadiusMeters + adaptiveBuffer;
+      final maxProximityThreshold = outerBuffer + 150;
+
+      // Optimization: Bounding Box Pre-filter
+      if (!_isZoneNearRouteBounds(zone.point, routeBounds, maxProximityThreshold)) {
+        continue;
+      }
+
+      final zoneNearest = _nearestDistanceToRoute(route, zone.point);
       final criticalBuffer = actualZoneRadiusMeters + (adaptiveBuffer * 0.45);
 
       if (zoneNearest < nearestDangerDistance) {
@@ -572,6 +586,46 @@ class JourneySafetyService {
     }
 
     return a.candidate.risk.score.compareTo(b.candidate.risk.score);
+  }
+
+  static Map<String, double> _calculateRouteBounds(List<LatLng> route) {
+    var minLat = route[0].latitude;
+    var maxLat = route[0].latitude;
+    var minLng = route[0].longitude;
+    var maxLng = route[0].longitude;
+
+    for (var i = 1; i < route.length; i++) {
+      if (route[i].latitude < minLat) minLat = route[i].latitude;
+      if (route[i].latitude > maxLat) maxLat = route[i].latitude;
+      if (route[i].longitude < minLng) minLng = route[i].longitude;
+      if (route[i].longitude > maxLng) maxLng = route[i].longitude;
+    }
+
+    return {
+      'minLat': minLat,
+      'maxLat': maxLat,
+      'minLng': minLng,
+      'maxLng': maxLng,
+    };
+  }
+
+  static bool _isZoneNearRouteBounds(
+    LatLng zonePoint,
+    Map<String, double> bounds,
+    double thresholdMeters,
+  ) {
+    // Approx 1 degree = 111km
+    final latBuffer = thresholdMeters / 111000.0;
+    // Lng buffer depends on latitude, using a safe upper bound
+    final lngBuffer = thresholdMeters / 70000.0;
+
+    if (zonePoint.latitude < bounds['minLat']! - latBuffer ||
+        zonePoint.latitude > bounds['maxLat']! + latBuffer ||
+        zonePoint.longitude < bounds['minLng']! - lngBuffer ||
+        zonePoint.longitude > bounds['maxLng']! + lngBuffer) {
+      return false;
+    }
+    return true;
   }
 }
 

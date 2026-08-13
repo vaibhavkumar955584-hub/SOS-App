@@ -1321,6 +1321,29 @@ class _MapScreenState extends State<MapScreen> {
               );
             }),
           ),
+          Obx(() {
+            final isRescueHelper =
+                SosListenerController.instance.isInRescueMode.value &&
+                !_sosController.isActiveBroadcast.value;
+            final joinedViaInvite =
+                RescueInviteController.instance.joinedViaInvite.value;
+
+            if (!isRescueHelper) {
+              return const SizedBox.shrink();
+            }
+
+            return Positioned(
+              left: 16,
+              right: 16,
+              bottom: 24,
+              child: _SaviorBottomControlCard(
+                onShareInvite: () => RescueInviteController.instance
+                    .shareActiveRescueInvite(),
+                onLeaveRescue: _confirmLeaveRescue,
+                joinedViaInvite: joinedViaInvite,
+              ),
+            );
+          }),
           if (_selectedResponderUid != null &&
               _responderRoutes[_selectedResponderUid] != null)
             Positioned(
@@ -1701,6 +1724,29 @@ class _MapScreenState extends State<MapScreen> {
                               style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 44,
+                          child: OutlinedButton.icon(
+                            onPressed: () => RescueInviteController.instance
+                                .shareActiveRescueInvite(),
+                            icon: const Icon(Icons.group_add, color: Colors.white),
+                            label: const Text(
+                              "Share Rescue Invite Link",
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              side: BorderSide(
+                                color: Colors.white.withOpacity(0.5),
                               ),
                             ),
                           ),
@@ -3422,6 +3468,121 @@ class _RiskLevelIndicator extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class _SaviorBottomControlCard extends StatelessWidget {
+  const _SaviorBottomControlCard({
+    required this.onShareInvite,
+    required this.onLeaveRescue,
+    required this.joinedViaInvite,
+  });
+
+  final VoidCallback onShareInvite;
+  final VoidCallback onLeaveRescue;
+  final bool joinedViaInvite;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 10,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      color: const Color(0xFF1E1E2C),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.redAccent.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.shield_moon_rounded,
+                    color: Colors.redAccent,
+                    size: 22,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Savior Interface Active',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        joinedViaInvite
+                            ? 'Joined via Rescue Dynamic Link'
+                            : 'Assisting active SOS session',
+                        style: TextStyle(
+                          color: Colors.white.withOpacity(0.7),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: onShareInvite,
+                    icon: const Icon(Icons.group_add, color: Colors.white),
+                    label: const Text(
+                      'Share Session',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFD14B7A),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                OutlinedButton.icon(
+                  onPressed: onLeaveRescue,
+                  icon: const Icon(Icons.exit_to_app, color: Colors.white),
+                  label: const Text(
+                    'Leave',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(color: Colors.white.withOpacity(0.4)),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 12,
+                      horizontal: 14,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
