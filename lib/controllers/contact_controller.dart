@@ -1,8 +1,11 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:get/get.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../services/pending_action_service.dart';
 
 class ContactController extends GetxController {
   static ContactController instanceOrCreate() {
@@ -20,6 +23,23 @@ class ContactController extends GetxController {
     super.onInit();
     loadContacts();
     refreshSmsPermissionStatus();
+    checkPendingPickedContact();
+  }
+
+  Future<void> checkPendingPickedContact() async {
+    try {
+      const channel = MethodChannel('safe_route/sms');
+      final Map<dynamic, dynamic>? res = await channel.invokeMethod('getPendingPickedContact');
+      if (res?['hasPending'] == true) {
+        final phone = res?['phoneNumber']?.toString() ?? '';
+        final cleanPhone = phone.replaceAll(RegExp(r'[^\d+]'), '');
+        if (cleanPhone.isNotEmpty) {
+          await addContact(cleanPhone);
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking pending picked contact: $e');
+    }
   }
 
   Future<void> refreshSmsPermissionStatus() async {
@@ -103,6 +123,50 @@ class ContactController extends GetxController {
     contacts.remove(phoneNumber);
     await _saveContacts();
     await _syncContactsToFirestore();
+  }
+
+  Future<String?> pickContactFromPhonebook() async {
+    try {
+      final status = await Permission.contacts.request();
+      if (!status.isGranted) {
+        Get.snackbar(
+          "Permission Required",
+          "Please grant Contacts permission to select contacts from your phonebook.",
+          snackPosition: SnackPosition.TOP,
+        );
+        return null;
+      }
+
+      await PendingActionService.savePendingAction(
+        action: PendingExternalAction.contactPicker,
+        routeIndex: 2,
+      );
+
+      const channel = MethodChannel('safe_route/sms');
+      final Map<dynamic, dynamic>? res = await channel.invokeMethod('pickContactFromPhonebook');
+      await checkPendingPickedContact();
+      if (res?['success'] == true) {
+        final phone = res?['phoneNumber']?.toString() ?? '';
+        final cleanPhone = phone.replaceAll(RegExp(r'[^\d+]'), '');
+        if (cleanPhone.isNotEmpty) {
+          await addContact(cleanPhone);
+          return cleanPhone;
+        }
+      } else if (res?['errorMessage'] != null && res?['errorMessage'] != 'No contact selected.') {
+        Get.snackbar(
+          "Phonebook Notice",
+          res!['errorMessage'].toString(),
+          snackPosition: SnackPosition.TOP,
+        );
+      }
+    } catch (e) {
+      Get.snackbar(
+        "Phonebook Error",
+        "Unable to pick contact from device phonebook.",
+        snackPosition: SnackPosition.TOP,
+      );
+    }
+    return null;
   }
 
   Future<void> updateContact(String oldValue, String newValue) async {

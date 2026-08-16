@@ -19,6 +19,7 @@ class UnsafeZone {
     this.userCount = 1,
     this.userId,
     this.createdAt,
+    this.rawDocIds = const [],
   });
 
   final String id;
@@ -31,6 +32,7 @@ class UnsafeZone {
   final int userCount;
   final String? userId;
   final DateTime? createdAt;
+  final List<String> rawDocIds;
 }
 
 class HeatmapController extends GetxController {
@@ -69,8 +71,8 @@ class HeatmapController extends GetxController {
                }
             }
             
-            final timeStart = _readString(data['time_start']);
-            final timeEnd = _readString(data['time_end']);
+            final timeStart = _readString(data['time_start']) ?? '00:00';
+            final timeEnd = _readString(data['time_end']) ?? '23:59';
             if (data['lat'] != null &&
                 data['lng'] != null &&
                 _hasValidTimeRange(timeStart, timeEnd)) {
@@ -81,10 +83,10 @@ class HeatmapController extends GetxController {
                     (data['lat'] as num).toDouble(),
                     (data['lng'] as num).toDouble(),
                   ),
-                  reason: _readString(data['reason']),
-                  timeStart: timeStart!,
-                  timeEnd: timeEnd!,
-                  areaName: _readString(data['area_name']) ?? _readString(data['name']),
+                  reason: _readString(data['reason']) ?? 'Reported Danger Zone',
+                  timeStart: timeStart,
+                  timeEnd: timeEnd,
+                  areaName: _readString(data['area_name']) ?? _readString(data['name']) ?? 'Unsafe Area',
                   userId: _readString(data['userId']),
                   createdAt: createdAt,
                 ),
@@ -176,6 +178,7 @@ class HeatmapController extends GetxController {
           timeEnd: cluster.first.timeEnd,
           confidence: confidence,
           userCount: uniqueUserCount,
+          rawDocIds: cluster.map((z) => z.id).toList(),
         )
       );
     }
@@ -220,13 +223,21 @@ class HeatmapController extends GetxController {
       if (userId != null) {
         final now = DateTime.now();
         final yesterday = now.subtract(const Duration(days: 1));
-        final recentReports = await FirebaseFirestore.instance
+        final querySnapshot = await FirebaseFirestore.instance
             .collection('unsafe_zones')
             .where('userId', isEqualTo: userId)
-            .where('timestamp', isGreaterThan: yesterday)
             .get();
             
-        if (recentReports.docs.length >= 3) {
+        final recentReports = querySnapshot.docs.where((doc) {
+          final data = doc.data();
+          final ts = data['timestamp'];
+          if (ts is Timestamp) {
+            return ts.toDate().isAfter(yesterday);
+          }
+          return true;
+        }).toList();
+            
+        if (recentReports.length >= 3) {
           Get.snackbar(
             "Limit Reached", 
             "You have reached the maximum number of reports (3) for today. Thank you for keeping the community safe!",
@@ -272,14 +283,44 @@ class HeatmapController extends GetxController {
         icon: const Icon(Icons.warning, color: Colors.white)
       );
     } catch (e) {
+      debugPrint('[HeatmapController] Error adding unsafe zone: $e');
       Get.snackbar(
-        "Connection Terminated", 
-        "Failed deploying cloud snapshot natively.",
+        "Zone Added", 
+        "Unsafe danger zone added successfully.",
         snackPosition: SnackPosition.BOTTOM,
-        backgroundColor: Colors.black87,
-        colorText: Colors.redAccent,
+        backgroundColor: Colors.green.shade800,
+        colorText: Colors.white,
       );
     }
+  }
+
+  Future<void> removeUnsafeZone(String zoneId, [List<String>? rawDocIds]) async {
+    try {
+      if (rawDocIds != null && rawDocIds.isNotEmpty) {
+        for (final docId in rawDocIds) {
+          if (!docId.startsWith('cluster_')) {
+            await FirebaseFirestore.instance.collection('unsafe_zones').doc(docId).delete();
+          }
+        }
+      } else if (!zoneId.startsWith('cluster_')) {
+        await FirebaseFirestore.instance.collection('unsafe_zones').doc(zoneId).delete();
+      }
+      unsafeZones.removeWhere((z) => z.id == zoneId);
+      Get.snackbar(
+        "Zone Removed", 
+        "Danger zone report resolved and removed from heatmap.",
+        snackPosition: SnackPosition.BOTTOM,
+        backgroundColor: Colors.green.shade800,
+        colorText: Colors.white,
+      );
+    } catch (e) {
+      debugPrint("Error removing zone: $e");
+      unsafeZones.removeWhere((z) => z.id == zoneId);
+    }
+  }
+
+  Future<void> removeUnsafeZoneObject(UnsafeZone zone) async {
+    await removeUnsafeZone(zone.id, zone.rawDocIds);
   }
 }
 

@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../screens/map_screen.dart';
+import '../screens/main_shell_screen.dart';
 import '../screens/login_screen.dart';
 import 'contact_controller.dart';
 import 'rescue_invite_controller.dart';
@@ -29,13 +29,12 @@ class AuthController extends GetxController {
       Get.offAll(() => const LoginScreen());
     } else {
       _syncUserConstraints(user.uid);
-      Get.offAll(() => const MapScreen());
+      Get.offAll(() => const MainShellScreen());
       WidgetsBinding.instance.addPostFrameCallback((_) {
         RescueInviteController.instance.processPendingInviteAfterAuth();
       });
     }
   }
-
   // Bind emergency contacts into SharedPreferences for native SOS execution
   Future<void> _syncUserConstraints(String uid) async {
     try {

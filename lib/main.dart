@@ -11,11 +11,14 @@ import 'controllers/rescue_stats_controller.dart';
 import 'controllers/sos_listener_controller.dart';
 import 'services/background_shake_service.dart';
 import 'firebase_options.dart';
+import 'theme/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    await Firebase.initializeApp(options: SafeRouteFirebaseOptions.android);
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
   } catch (e) {
     debugPrint(
       "Firebase Initialization Failed natively. Ensure google-services.json is mapped: $e",
@@ -56,23 +59,9 @@ class SafeRouteApp extends StatelessWidget {
     return GetMaterialApp(
       title: 'SafeRoute',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-        appBarTheme: const AppBarTheme(centerTitle: true, elevation: 0),
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-        appBarTheme: const AppBarTheme(centerTitle: true, elevation: 0),
-      ),
-      themeMode: ThemeMode.system,
+      theme: AppTheme.darkTheme,
+      darkTheme: AppTheme.darkTheme,
+      themeMode: ThemeMode.dark,
       home: const AuthWrapper(),
     );
   }

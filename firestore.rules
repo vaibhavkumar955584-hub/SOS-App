@@ -1,0 +1,75 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isUser(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    // users/{uid} collection
+    match /users/{uid} {
+      allow read, write: if isUser(uid);
+    }
+
+    // sos_broadcasts collection
+    match /sos_broadcasts/{broadcastId} {
+      allow create: if isAuthenticated() && request.resource.data.victimUid == request.auth.uid;
+      allow read: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+                      request.auth.uid == resource.data.victimUid ||
+                      request.auth.uid == resource.data.assignedResponder
+                    );
+      allow delete: if false;
+    }
+
+    // active_sos collection (in-app mapping)
+    match /active_sos/{sosId} {
+      allow create: if isAuthenticated() && 
+                    (request.resource.data.victimUid == request.auth.uid || request.resource.data.uid == request.auth.uid || sosId == request.auth.uid);
+      allow read: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+                      resource.data.victimUid == request.auth.uid ||
+                      resource.data.uid == request.auth.uid ||
+                      sosId == request.auth.uid ||
+                      request.auth.uid == resource.data.assignedResponder
+                    );
+      allow delete: if false;
+    }
+
+    // unsafe_zones collection
+    match /unsafe_zones/{zoneId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() &&
+                    request.resource.data.keys().hasAll(['lat', 'lng', 'reason', 'timestamp']) &&
+                    request.resource.data.keys().hasOnly(['lat', 'lng', 'reason', 'timestamp', 'reporterUid', 'userId', 'time_start', 'time_end', 'area_name', 'name']);
+      allow update, delete: if isAuthenticated() && (
+                              resource.data.reporterUid == request.auth.uid ||
+                              resource.data.userId == request.auth.uid
+                            );
+    }
+
+    // rescue_sessions collection
+    match /rescue_sessions/{sessionId} {
+      allow read, write: if isAuthenticated() && (
+                            resource == null ||
+                            resource.data.victimUid == request.auth.uid ||
+                            resource.data.responderUid == request.auth.uid ||
+                            request.resource.data.victimUid == request.auth.uid ||
+                            request.resource.data.responderUid == request.auth.uid
+                          );
+    }
+
+    // stats & sos_history fallback
+    match /stats/{statId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /sos_history/{historyId} {
+      allow read, write: if isAuthenticated();
+    }
+  }
+}

@@ -49,4 +49,8 @@ lib/firebase_options.dart
 **/google-services.json
 **/GoogleService-Info.plist
 backend/.env
+backend/*firebase-adminsdk*.json
+backend/*.json
+!backend/package.json
+!backend/package-lock.json
 .gradle-user-home/

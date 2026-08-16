@@ -17,11 +17,19 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.view.WindowManager
 import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
-import android.view.WindowManager
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import android.net.Uri
+import android.telephony.TelephonyManager
+import android.telephony.PhoneStateListener
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.LocationSettingsRequest
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.Priority
+import com.google.android.gms.common.api.ResolvableApiException
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -31,6 +39,10 @@ import java.io.FileInputStream
 
 class MainActivity : FlutterActivity() {
     private val smsChannelName = "safe_route/sms"
+    private var pendingContactPickerResult: MethodChannel.Result? = null
+    private val REQUEST_CODE_PICK_CONTACT = 1002
+    private var pendingImagePickerResult: MethodChannel.Result? = null
+    private val REQUEST_CODE_PICK_IMAGE = 1003
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,6 +71,58 @@ class MainActivity : FlutterActivity() {
             smsChannelName,
         ).setMethodCallHandler { call, result ->
             when (call.method) {
+                "pickImageFromGallery" -> {
+                    pickImageFromGallery(result)
+                }
+
+                "getPendingProfileImage" -> {
+                    val prefs = getSharedPreferences("safe_route_picker", Context.MODE_PRIVATE)
+                    val imagePath = prefs.getString("pending_profile_image", null)
+                    if (imagePath != null && File(imagePath).exists()) {
+                        prefs.edit().remove("pending_profile_image").apply()
+                        result.success(mapOf("hasPending" to true, "imagePath" to imagePath))
+                    } else {
+                        result.success(mapOf("hasPending" to false))
+                    }
+                }
+
+                "pickContactFromPhonebook" -> {
+                    pickContactFromPhonebook(result)
+                }
+
+                "getPendingPickedContact" -> {
+                    val prefs = getSharedPreferences("safe_route_picker", Context.MODE_PRIVATE)
+                    val phone = prefs.getString("pending_phone", null)
+                    val name = prefs.getString("pending_name", null)
+                    if (phone != null) {
+                        prefs.edit().remove("pending_phone").remove("pending_name").apply()
+                        result.success(mapOf(
+                            "hasPending" to true,
+                            "phoneNumber" to phone,
+                            "name" to name
+                        ))
+                    } else {
+                        result.success(mapOf("hasPending" to false))
+                    }
+                }
+
+                "makeDirectCall" -> {
+                    val phoneNumber = call.argument<String>("phoneNumber")
+                    if (phoneNumber.isNullOrBlank()) {
+                        result.success(mapOf("success" to false, "errorMessage" to "Missing phone number."))
+                        return@setMethodCallHandler
+                    }
+                    makeDirectCall(phoneNumber, result)
+                }
+
+                "startCallListener" -> {
+                    startCallListener(result)
+                }
+
+                "resolveLocationSettings" -> {
+                    resolveLocationSettings(result)
+                }
+
                 "sendDirectSms" -> {
                     val phoneNumber = call.argument<String>("phoneNumber")
                     val message = call.argument<String>("message")
@@ -434,6 +498,163 @@ class MainActivity : FlutterActivity() {
                 "success" to false,
                 "errorMessage" to (e.message ?: "Unable to open recording file."),
             )
+        }
+    }
+
+    private fun makeDirectCall(phoneNumber: String, result: MethodChannel.Result) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            result.success(mapOf("success" to false, "errorMessage" to "CALL_PHONE permission not granted."))
+            return
+        }
+        try {
+            val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$phoneNumber"))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+            result.success(mapOf("success" to true))
+        } catch (e: Exception) {
+            result.success(mapOf("success" to false, "errorMessage" to (e.message ?: "Direct call failed.")))
+        }
+    }
+
+    private fun startCallListener(result: MethodChannel.Result) {
+        val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+        if (telephonyManager == null) {
+            result.success(mapOf("success" to false, "errorMessage" to "TelephonyManager unavailable."))
+            return
+        }
+
+        try {
+            val listener = object : PhoneStateListener() {
+                @Suppress("DEPRECATION")
+                override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                    val stateString = when (state) {
+                        TelephonyManager.CALL_STATE_OFFHOOK -> "OFFHOOK"
+                        TelephonyManager.CALL_STATE_RINGING -> "RINGING"
+                        TelephonyManager.CALL_STATE_IDLE -> "IDLE"
+                        else -> "UNKNOWN"
+                    }
+                    val methodChannel = MethodChannel(flutterEngine!!.dartExecutor.binaryMessenger, smsChannelName)
+                    methodChannel.invokeMethod("onCallStateChanged", mapOf("state" to stateString))
+                }
+            }
+            @Suppress("DEPRECATION")
+            telephonyManager.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+            result.success(mapOf("success" to true))
+        } catch (e: Exception) {
+            result.success(mapOf("success" to false, "errorMessage" to (e.message ?: "Failed to start call state listener.")))
+        }
+    }
+
+    private fun resolveLocationSettings(result: MethodChannel.Result) {
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000).build()
+        val builder = LocationSettingsRequest.Builder().addLocationRequest(locationRequest).setAlwaysShow(true)
+        val client = LocationServices.getSettingsClient(this)
+        val task = client.checkLocationSettings(builder.build())
+
+        task.addOnSuccessListener {
+            result.success(mapOf("success" to true, "resolutionRequired" to false))
+        }
+        task.addOnFailureListener { exception ->
+            if (exception is ResolvableApiException) {
+                try {
+                    exception.startResolutionForResult(this, 1001)
+                    result.success(mapOf("success" to true, "resolutionRequired" to true))
+                } catch (e: Exception) {
+                    result.success(mapOf("success" to false, "errorMessage" to e.message))
+                }
+            } else {
+                result.success(mapOf("success" to false, "errorMessage" to exception.message))
+            }
+        }
+    }
+
+    private fun pickContactFromPhonebook(result: MethodChannel.Result) {
+        try {
+            pendingContactPickerResult = result
+            val intent = Intent(Intent.ACTION_PICK, android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI)
+            startActivityForResult(intent, REQUEST_CODE_PICK_CONTACT)
+        } catch (e: Exception) {
+            result.success(mapOf("success" to false, "errorMessage" to (e.message ?: "Failed to open phonebook.")))
+            pendingContactPickerResult = null
+        }
+    }
+
+    private fun pickImageFromGallery(result: MethodChannel.Result) {
+        try {
+            pendingImagePickerResult = result
+            val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+            startActivityForResult(intent, REQUEST_CODE_PICK_IMAGE)
+        } catch (e: Exception) {
+            result.success(mapOf("success" to false, "errorMessage" to (e.message ?: "Failed to open gallery.")))
+            pendingImagePickerResult = null
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_CODE_PICK_IMAGE) {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                val imageUri = data.data
+                if (imageUri != null) {
+                    try {
+                        val inputStream = contentResolver.openInputStream(imageUri)
+                        val outputFile = File(filesDir, "user_profile_avatar.jpg")
+                        outputFile.outputStream().use { outputStream ->
+                            inputStream?.copyTo(outputStream)
+                        }
+                        val imagePath = outputFile.absolutePath
+                        val prefs = getSharedPreferences("safe_route_picker", Context.MODE_PRIVATE)
+                        prefs.edit().putString("pending_profile_image", imagePath).apply()
+
+                        pendingImagePickerResult?.success(mapOf(
+                            "success" to true,
+                            "imagePath" to imagePath
+                        ))
+                        pendingImagePickerResult = null
+                        return
+                    } catch (e: Exception) {
+                        pendingImagePickerResult?.success(mapOf("success" to false, "errorMessage" to (e.message ?: "Failed saving image.")))
+                        pendingImagePickerResult = null
+                        return
+                    }
+                }
+            }
+            pendingImagePickerResult?.success(mapOf("success" to false, "errorMessage" to "No image selected."))
+            pendingImagePickerResult = null
+        }
+
+        if (requestCode == REQUEST_CODE_PICK_CONTACT) {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                val contactUri = data.data
+                if (contactUri != null) {
+                    val projection = arrayOf(
+                        android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER,
+                        android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                    )
+                    contentResolver.query(contactUri, projection, null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val numberIndex = cursor.getColumnIndex(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER)
+                            val nameIndex = cursor.getColumnIndex(android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                            val number = if (numberIndex >= 0) cursor.getString(numberIndex) else ""
+                            val name = if (nameIndex >= 0) cursor.getString(nameIndex) else ""
+                            
+                            val prefs = getSharedPreferences("safe_route_picker", Context.MODE_PRIVATE)
+                            prefs.edit().putString("pending_phone", number).putString("pending_name", name).apply()
+
+                            pendingContactPickerResult?.success(mapOf(
+                                "success" to true,
+                                "phoneNumber" to number,
+                                "name" to name
+                            ))
+                            pendingContactPickerResult = null
+                            return
+                        }
+                    }
+                }
+            }
+            pendingContactPickerResult?.success(mapOf("success" to false, "errorMessage" to "No contact selected."))
+            pendingContactPickerResult = null
         }
     }
 }

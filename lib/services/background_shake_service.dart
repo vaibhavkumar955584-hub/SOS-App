@@ -159,7 +159,9 @@ void onStart(ServiceInstance service) async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    await Firebase.initializeApp(options: SafeRouteFirebaseOptions.android);
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
   } catch (e) {
     debugPrint("Firebase already initialized or failed: $e");
   }

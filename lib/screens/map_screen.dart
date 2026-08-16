@@ -13,13 +13,15 @@ import '../controllers/sos_controller.dart';
 import '../controllers/heatmap_controller.dart';
 import '../controllers/history_controller.dart';
 import '../controllers/rescue_invite_controller.dart';
-import '../controllers/rescue_stats_controller.dart';
 import '../services/journey_safety_service.dart';
 import '../services/routing_service.dart';
 import '../controllers/sos_listener_controller.dart';
 import '../screens/safe_route_menu_screens.dart';
 import '../controllers/risk_controller.dart';
 import '../controllers/sos_heatmap_controller.dart';
+import '../controllers/journey_guard_controller.dart';
+import '../services/place_search_service.dart';
+import '../theme/app_colors.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -287,6 +289,95 @@ class _MapScreenState extends State<MapScreen> {
           onPressed: _fetchCurrentLocation,
         ),
         behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  void _showUnsafeZoneDetailsSheet(UnsafeZone zone) {
+    Get.bottomSheet(
+      Container(
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withOpacity(0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.warning_amber_rounded, color: Colors.redAccent, size: 28),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        zone.reason ?? 'Reported Danger Zone',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                      ),
+                      Text(
+                        'Active hours: ${zone.timeStart} - ${zone.timeEnd}',
+                        style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.amber.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.people_outline, color: Colors.amber, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Verified by ${zone.userCount} community report(s)',
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Get.back(),
+                    child: const Text('Close'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+                    onPressed: () async {
+                      Get.back();
+                      await _heatmapController.removeUnsafeZoneObject(zone);
+                    },
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    label: const Text('Remove Danger Zone'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -929,100 +1020,6 @@ class _MapScreenState extends State<MapScreen> {
           max(mediaQuery.viewPadding.bottom, mediaQuery.padding.bottom) + 8,
     );
     return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'SafeRoute',
-          style: TextStyle(fontWeight: FontWeight.bold),
-        ),
-        centerTitle: true,
-        elevation: 0,
-        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-        actions: [
-          Row(
-            children: [
-              Tooltip(
-                message: 'Open Safety Controls',
-                child: IconButton(
-                  onPressed: _showSafetyControlsSheet,
-                  icon: const Icon(Icons.tune_rounded),
-                  visualDensity: VisualDensity.compact,
-                ),
-              ),
-              Tooltip(
-                message:
-                    'Automatically monitors your journey and can trigger SOS if high-risk deviation is detected.',
-                child: Padding(
-                  padding: const EdgeInsets.only(right: 4),
-                  child: _TopBarStatusChip(
-                    label: _isJourneyActive
-                        ? 'Guard Active'
-                        : _isJourneyGuardEnabled
-                        ? 'Guard Ready'
-                        : 'Guard Off',
-                    icon: _isJourneyActive
-                        ? Icons.shield
-                        : Icons.shield_outlined,
-                    accentColor: _isJourneyActive
-                        ? Colors.greenAccent
-                        : _isJourneyGuardEnabled
-                        ? Colors.amber
-                        : Colors.white70,
-                    isEnabled: _isJourneyGuardEnabled,
-                    onTap: () =>
-                        _handleJourneyGuardToggle(!_isJourneyGuardEnabled),
-                  ),
-                ),
-              ),
-              PopupMenuButton<_AppMenuAction>(
-                icon: const Icon(Icons.more_vert),
-                onSelected: _handleMenuAction,
-                itemBuilder: (context) => const [
-                  PopupMenuItem(
-                    value: _AppMenuAction.emergencyContacts,
-                    child: ListTile(
-                      dense: true,
-                      leading: Icon(Icons.contact_phone_outlined),
-                      title: Text('Emergency Contacts'),
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: _AppMenuAction.sosTimer,
-                    child: ListTile(
-                      dense: true,
-                      leading: Icon(Icons.timer_outlined),
-                      title: Text('SOS Timer'),
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: _AppMenuAction.editProfile,
-                    child: ListTile(
-                      dense: true,
-                      leading: Icon(Icons.person_outline),
-                      title: Text('Edit Profile'),
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: _AppMenuAction.history,
-                    child: ListTile(
-                      dense: true,
-                      leading: Icon(Icons.history),
-                      title: Text('History'),
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: _AppMenuAction.logout,
-                    child: ListTile(
-                      dense: true,
-                      leading: Icon(Icons.logout),
-                      title: Text('Logout'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ],
-      ),
       body: Stack(
         children: [
           _currentPosition == null
@@ -1079,6 +1076,71 @@ class _MapScreenState extends State<MapScreen> {
                           'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                       userAgentPackageName: 'com.example.safe_route',
                     ),
+
+                    // Heatmap Unsafe Danger Zones Circles
+                    Obx(() {
+                      if (!_heatmapController.isHeatmapVisible.value) {
+                        return const SizedBox.shrink();
+                      }
+                      final zones = _heatmapController.unsafeZones;
+                      return CircleLayer(
+                        circles: zones.map((zone) {
+                          final isSelected = zone.id == _selectedUnsafeZoneId;
+                          final color = zone.confidence == ZoneConfidence.high
+                              ? Colors.red.withOpacity(0.45)
+                              : zone.confidence == ZoneConfidence.medium
+                                  ? Colors.orange.withOpacity(0.40)
+                                  : Colors.amber.withOpacity(0.35);
+
+                          return CircleMarker(
+                            point: zone.point,
+                            radius: _unsafeZoneRadiusMeters,
+                            useRadiusInMeter: true,
+                            color: color,
+                            borderColor: isSelected ? Colors.yellowAccent : Colors.red,
+                            borderStrokeWidth: isSelected ? 3.0 : 1.5,
+                          );
+                        }).toList(),
+                      );
+                    }),
+
+                    // Heatmap Unsafe Danger Zones Markers
+                    Obx(() {
+                      if (!_heatmapController.isHeatmapVisible.value) {
+                        return const SizedBox.shrink();
+                      }
+                      final zones = _heatmapController.unsafeZones;
+                      return MarkerLayer(
+                        markers: zones.map((zone) {
+                          return Marker(
+                            point: zone.point,
+                            width: 44,
+                            height: 44,
+                            child: GestureDetector(
+                              onTap: () {
+                                setState(() => _selectedUnsafeZoneId = zone.id);
+                                _showUnsafeZoneDetailsSheet(zone);
+                              },
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: Colors.red.shade900.withOpacity(0.88),
+                                  shape: BoxShape.circle,
+                                  border: Border.all(color: Colors.white, width: 2),
+                                  boxShadow: const [
+                                    BoxShadow(color: Colors.black45, blurRadius: 6),
+                                  ],
+                                ),
+                                child: const Icon(
+                                  Icons.warning_amber_rounded,
+                                  color: Colors.white,
+                                  size: 24,
+                                ),
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      );
+                    }),
                     PolylineLayer(
                       polylines: [
                         if (_sosRouteLocations.isNotEmpty)
@@ -1096,6 +1158,54 @@ class _MapScreenState extends State<MapScreen> {
                           ),
                       ],
                     ),
+                    // Journey Guard Route Lines Overlay
+                    Obx(() {
+                      final jgCtrl = JourneyGuardController.instanceOrCreate();
+                      if (jgCtrl.state.value == JourneyGuardState.routePreview ||
+                          jgCtrl.state.value == JourneyGuardState.activeGuard) {
+                        final polylines = <Polyline>[];
+                        for (int i = 0; i < jgCtrl.routeOptions.length; i++) {
+                          final opt = jgCtrl.routeOptions[i];
+                          final isSelected = (i == jgCtrl.selectedRouteIndex.value);
+                          polylines.add(
+                            Polyline(
+                              points: opt.candidate.route.points,
+                              color: isSelected ? opt.color : opt.color.withValues(alpha: 0.35),
+                              strokeWidth: isSelected ? 6.0 : 3.5,
+                            ),
+                          );
+                        }
+                        return PolylineLayer(polylines: polylines);
+                      }
+                      return const SizedBox.shrink();
+                    }),
+                    // Journey Guard Destination Marker
+                    Obx(() {
+                      final jgCtrl = JourneyGuardController.instanceOrCreate();
+                      final dest = jgCtrl.selectedDestination.value;
+                      if (dest != null &&
+                          (jgCtrl.state.value == JourneyGuardState.routePreview ||
+                           jgCtrl.state.value == JourneyGuardState.activeGuard)) {
+                        return MarkerLayer(
+                          markers: [
+                            Marker(
+                              point: LatLng(dest.latitude, dest.longitude),
+                              width: 48,
+                              height: 48,
+                              child: Container(
+                                decoration: const BoxDecoration(
+                                  color: AppColors.signalRed,
+                                  shape: BoxShape.circle,
+                                  boxShadow: [BoxShadow(color: Colors.black54, blurRadius: 8)],
+                                ),
+                                child: const Icon(Icons.flag_rounded, color: Colors.white, size: 28),
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+                      return const SizedBox.shrink();
+                    }),
                     if (_responderRoutes.isNotEmpty)
                       PolylineLayer(
                         polylines: _responderRoutes.values.map((route) {
@@ -1231,38 +1341,65 @@ class _MapScreenState extends State<MapScreen> {
                     }),
                     Obx(() {
                       if (_heatmapController.isHeatmapVisible.value) {
-                        return CircleLayer(
-                          circles: _heatmapController.unsafeZones.map((zone) {
-                            final isSelected = zone.id == _selectedUnsafeZoneId;
-                            
-                            Color baseColor;
-                            switch (zone.confidence) {
-                              case ZoneConfidence.high:
-                                baseColor = Colors.red;
-                                break;
-                              case ZoneConfidence.medium:
-                                baseColor = Colors.orange;
-                                break;
-                              case ZoneConfidence.low:
-                                baseColor = Colors.orangeAccent;
-                                break;
-                            }
-                            
-                            final fillColor = baseColor.withOpacity(
-                                isSelected ? 0.34 : (zone.confidence == ZoneConfidence.low ? 0.15 : 0.24)
-                            );
-                            
-                            return CircleMarker(
-                              point: zone.point,
-                              color: fillColor,
-                              borderColor: baseColor,
-                              borderStrokeWidth: isSelected ? 2.2 : 1.2,
-                              useRadiusInMeter: true,
-                              radius: isSelected
-                                  ? _unsafeZoneRadiusMeters + 20
-                                  : _unsafeZoneRadiusMeters,
-                            );
-                          }).toList(),
+                        return Stack(
+                          children: [
+                            CircleLayer(
+                              circles: _heatmapController.unsafeZones.map((zone) {
+                                final isSelected = zone.id == _selectedUnsafeZoneId;
+                                
+                                Color baseColor;
+                                switch (zone.confidence) {
+                                  case ZoneConfidence.high:
+                                    baseColor = Colors.red;
+                                    break;
+                                  case ZoneConfidence.medium:
+                                    baseColor = Colors.orange;
+                                    break;
+                                  case ZoneConfidence.low:
+                                    baseColor = Colors.orangeAccent;
+                                    break;
+                                }
+                                
+                                final fillColor = baseColor.withOpacity(
+                                    isSelected ? 0.34 : (zone.confidence == ZoneConfidence.low ? 0.15 : 0.24)
+                                );
+                                
+                                return CircleMarker(
+                                  point: zone.point,
+                                  color: fillColor,
+                                  borderColor: baseColor,
+                                  borderStrokeWidth: isSelected ? 2.2 : 1.2,
+                                  useRadiusInMeter: true,
+                                  radius: isSelected
+                                      ? _unsafeZoneRadiusMeters + 20
+                                      : _unsafeZoneRadiusMeters,
+                                );
+                              }).toList(),
+                            ),
+                            MarkerLayer(
+                              markers: _heatmapController.unsafeZones.map((zone) {
+                                return Marker(
+                                  point: zone.point,
+                                  width: 40,
+                                  height: 40,
+                                  child: GestureDetector(
+                                    onTap: () => _showZoneDetailsSheet(context, zone),
+                                    child: Container(
+                                      padding: const EdgeInsets.all(6),
+                                      decoration: const BoxDecoration(
+                                        color: Color(0xFFB9000D),
+                                        shape: BoxShape.circle,
+                                        boxShadow: [
+                                          BoxShadow(color: Colors.black45, blurRadius: 4),
+                                        ],
+                                      ),
+                                      child: const Icon(Icons.warning_amber_rounded, color: Colors.yellowAccent, size: 20),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ],
                         );
                       }
                       return const SizedBox.shrink();
@@ -1303,24 +1440,7 @@ class _MapScreenState extends State<MapScreen> {
               ),
             );
           }),
-          Positioned(
-            top: _activeRouteSummary == null ? 16 : 178,
-            left: 16,
-            right: 16,
-            child: Obx(() {
-              final stats = RescueStatsController.instance;
-              final totalCount = stats.totalRescues.value;
-              final personalCount = stats.personalHelpedRescues.value;
-              return _RescueStatsBanner(
-                totalLabel: totalCount >= 100
-                    ? 'Trusted by $totalCount+ successful rescues'
-                    : '$totalCount+ Rescues Completed',
-                personalLabel: personalCount > 0
-                    ? 'You helped in $personalCount rescues'
-                    : null,
-              );
-            }),
-          ),
+
           Obx(() {
             final isRescueHelper =
                 SosListenerController.instance.isInRescueMode.value &&
@@ -1498,7 +1618,38 @@ class _MapScreenState extends State<MapScreen> {
               child: const Center(child: CircularProgressIndicator()),
             ),
 
-          // GetX Reactive Full-Screen Overlays
+          // 1. Journey Guard Destination Search & Route Selection Overlay
+          _buildJourneyGuardOverlay(context),
+
+
+
+
+
+          // 4. Focus My Location FAB (LOWER RIGHT OF MAP)
+          if (_currentPosition != null &&
+              !_isLoading &&
+              !_sosController.isLoading.value)
+            Positioned(
+              right: 16,
+              bottom: 24,
+              child: FloatingActionButton(
+                heroTag: 'locationBtn',
+                onPressed: () {
+                  if (_currentPosition != null) {
+                    _moveCameraTo(_currentPosition!);
+                  }
+                },
+                backgroundColor: Theme.of(
+                  context,
+                ).colorScheme.primary,
+                foregroundColor: Theme.of(
+                  context,
+                ).colorScheme.onPrimary,
+                child: const Icon(Icons.my_location),
+              ),
+            ),
+
+          // 5. GetX Reactive Full-Screen Overlays (Placed at top of Stack for clean backdrop coverage)
           Obx(() {
             if (_sosController.isCountdown.value) {
               return Container(
@@ -1550,258 +1701,263 @@ class _MapScreenState extends State<MapScreen> {
             if (_sosController.isSent.value) {
               return Container(
                 color: Colors.black87,
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 32,
-                    ),
-                    margin: const EdgeInsets.symmetric(horizontal: 24),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[900],
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.redAccent, width: 2),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text(
-                          "🚨 SOS ALERT SENT",
-                          style: TextStyle(
-                            color: Colors.redAccent,
-                            fontSize: 26,
-                            fontWeight: FontWeight.bold,
-                          ),
+                child: SafeArea(
+                  child: Center(
+                    child: SingleChildScrollView(
+                      physics: const BouncingScrollPhysics(),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 24,
                         ),
-                        const SizedBox(height: 16),
-                        Obx(
-                          () => Text(
-                            _sosController.isSendingEmergencyAlerts.value
-                                ? _sosController.smsStatusMessage.value
-                                : "Your emergency alert is active and contacts have been processed.",
-                            style: const TextStyle(
-                              color: Colors.white70,
-                              fontSize: 16,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
+                        margin: const EdgeInsets.symmetric(horizontal: 16),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF191C1F),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.redAccent, width: 2),
                         ),
-                        Obx(() {
-                          final messages = <String>[];
-                          if (_sosController.isEmergencyRecording.value ||
-                              _sosController
-                                  .recordingStatusMessage
-                                  .value
-                                  .isNotEmpty) {
-                            messages.add(
-                              _sosController.recordingStatusMessage.value,
-                            );
-                          }
-                          if (_sosController.isVoiceSOSActive.value &&
-                              _sosController
-                                  .voiceStatusMessage
-                                  .value
-                                  .isNotEmpty) {
-                            messages.add(
-                              _sosController.voiceStatusMessage.value,
-                            );
-                          }
-                          if (messages.isEmpty) {
-                            return const SizedBox.shrink();
-                          }
-                          return Padding(
-                            padding: const EdgeInsets.only(top: 10),
-                            child: Text(
-                              messages.join('\n'),
-                              style: const TextStyle(
-                                color: Colors.white60,
-                                fontSize: 13,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          );
-                        }),
-                        const SizedBox(height: 14),
-                        Obx(
-                          () => Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.22),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(0.08),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text(
+                              "🚨 SOS ALERT SENT",
+                              style: TextStyle(
+                                color: Colors.redAccent,
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
                               ),
                             ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Sent: ${_sosController.smsSentCount.value}/${_sosController.smsTotalCount.value}',
+                            const SizedBox(height: 12),
+                            Obx(
+                              () => Text(
+                                _sosController.isSendingEmergencyAlerts.value
+                                    ? _sosController.smsStatusMessage.value
+                                    : "Your emergency alert is active and contacts have been processed.",
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 14,
+                                ),
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                            Obx(() {
+                              final messages = <String>[];
+                              if (_sosController.isEmergencyRecording.value ||
+                                  _sosController
+                                      .recordingStatusMessage
+                                      .value
+                                      .isNotEmpty) {
+                                messages.add(
+                                  _sosController.recordingStatusMessage.value,
+                                );
+                              }
+                              if (_sosController.isVoiceSOSActive.value &&
+                                  _sosController
+                                      .voiceStatusMessage
+                                      .value
+                                      .isNotEmpty) {
+                                messages.add(
+                                  _sosController.voiceStatusMessage.value,
+                                );
+                              }
+                              if (messages.isEmpty) {
+                                return const SizedBox.shrink();
+                              }
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text(
+                                  messages.join('\n'),
                                   style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w700,
+                                    color: Colors.white60,
+                                    fontSize: 12,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                              );
+                            }),
+                            const SizedBox(height: 12),
+                            Obx(
+                              () => Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withOpacity(0.22),
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: Colors.white.withOpacity(0.08),
                                   ),
                                 ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  'Failed: ${_sosController.smsFailedCount.value}',
-                                  style: const TextStyle(color: Colors.white70),
-                                ),
-                                if (_sosController
-                                    .smsRetryStatus
-                                    .value
-                                    .isNotEmpty)
-                                  Padding(
-                                    padding: const EdgeInsets.only(top: 6),
-                                    child: Text(
-                                      _sosController.smsRetryStatus.value,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      'Sent: ${_sosController.smsSentCount.value}/${_sosController.smsTotalCount.value}',
                                       style: const TextStyle(
-                                        color: Colors.orangeAccent,
-                                        fontSize: 13,
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w700,
                                       ),
                                     ),
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ),
-                        Obx(
-                          () =>
-                              _sosController.availableSmsSubscriptions.length >
-                                  1
-                              ? Padding(
-                                  padding: const EdgeInsets.only(top: 12),
-                                  child: SizedBox(
-                                    width: double.infinity,
-                                    height: 46,
-                                    child: OutlinedButton.icon(
-                                      onPressed: _sosController
-                                          .showSmsSubscriptionPicker,
-                                      icon: const Icon(Icons.sim_card_outlined),
-                                      label: const Text('Choose SMS SIM'),
-                                      style: OutlinedButton.styleFrom(
-                                        foregroundColor: Colors.white,
-                                        side: const BorderSide(
-                                          color: Colors.white24,
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'Failed: ${_sosController.smsFailedCount.value}',
+                                      style: const TextStyle(color: Colors.white70, fontSize: 13),
+                                    ),
+                                    if (_sosController
+                                        .smsRetryStatus
+                                        .value
+                                        .isNotEmpty)
+                                      Padding(
+                                        padding: const EdgeInsets.only(top: 4),
+                                        child: Text(
+                                          _sosController.smsRetryStatus.value,
+                                          style: const TextStyle(
+                                            color: Colors.orangeAccent,
+                                            fontSize: 12,
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                  ),
-                                )
-                              : const SizedBox.shrink(),
-                        ),
-                        const SizedBox(height: 36),
-                        SizedBox(
-                          width: double.infinity,
-                          height: 48,
-                          child: ElevatedButton.icon(
-                            onPressed: _sosController.copyMessage,
-                            icon: const Icon(Icons.copy),
-                            label: const Text(
-                              "Copy Message",
-                              style: TextStyle(fontSize: 16),
-                            ),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.grey[800],
-                              foregroundColor: Colors.white,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          height: 48,
-                          child: ElevatedButton.icon(
-                            onPressed: _sosController.shareSOS,
-                            icon: const Icon(Icons.share),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.redAccent,
-                              foregroundColor: Colors.white,
-                            ),
-                            label: const Text(
-                              "Share to Apps",
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        SizedBox(
-                          width: double.infinity,
-                          height: 44,
-                          child: OutlinedButton.icon(
-                            onPressed: () => RescueInviteController.instance
-                                .shareActiveRescueInvite(),
-                            icon: const Icon(Icons.group_add, color: Colors.white),
-                            label: const Text(
-                              "Share Rescue Invite Link",
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
-                            ),
-                            style: OutlinedButton.styleFrom(
-                              side: BorderSide(
-                                color: Colors.white.withOpacity(0.5),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        const SizedBox(height: 12),
-                        SizedBox(
-                          width: double.infinity,
-                          height: 48,
-                          child: Obx(
-                            () => ElevatedButton.icon(
-                              onPressed: _sosController.isCompletingRescue.value
-                                  ? null
-                                  : _sosController.stopActiveSOS,
-                              icon: _sosController.isCompletingRescue.value
-                                  ? const SizedBox(
-                                      width: 18,
-                                      height: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : const Icon(Icons.verified_user),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.green,
-                                foregroundColor: Colors.white,
-                              ),
-                              label: Text(
-                                _sosController.isCompletingRescue.value
-                                    ? "COMPLETING RESCUE..."
-                                    : "MARK AS SAFE (STOP SOS)",
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
+                                  ],
                                 ),
                               ),
                             ),
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        SizedBox(
-                          width: double.infinity,
-                          child: TextButton(
-                            onPressed: _sosController.closeAlert,
-                            child: const Text(
-                              "Keep Running & Close Menu",
-                              style: TextStyle(
-                                color: Colors.white54,
-                                fontSize: 14,
+                            Obx(
+                              () =>
+                                  _sosController.availableSmsSubscriptions.length >
+                                      1
+                                  ? Padding(
+                                      padding: const EdgeInsets.only(top: 10),
+                                      child: SizedBox(
+                                        width: double.infinity,
+                                        height: 44,
+                                        child: OutlinedButton.icon(
+                                          onPressed: _sosController
+                                              .showSmsSubscriptionPicker,
+                                          icon: const Icon(Icons.sim_card_outlined, size: 18),
+                                          label: const Text('Choose SMS SIM'),
+                                          style: OutlinedButton.styleFrom(
+                                            foregroundColor: Colors.white,
+                                            side: const BorderSide(
+                                              color: Colors.white24,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    )
+                                  : const SizedBox.shrink(),
+                            ),
+                            const SizedBox(height: 16),
+                            SizedBox(
+                              width: double.infinity,
+                              height: 46,
+                              child: ElevatedButton.icon(
+                                onPressed: _sosController.copyMessage,
+                                icon: const Icon(Icons.copy, size: 18),
+                                label: const Text(
+                                  "Copy Message",
+                                  style: TextStyle(fontSize: 15),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.grey[800],
+                                  foregroundColor: Colors.white,
+                                ),
                               ),
                             ),
-                          ),
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              width: double.infinity,
+                              height: 46,
+                              child: ElevatedButton.icon(
+                                onPressed: _sosController.shareSOS,
+                                icon: const Icon(Icons.share, size: 18),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.redAccent,
+                                  foregroundColor: Colors.white,
+                                ),
+                                label: const Text(
+                                  "Share to Apps",
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              width: double.infinity,
+                              height: 44,
+                              child: OutlinedButton.icon(
+                                onPressed: () => RescueInviteController.instance
+                                    .shareActiveRescueInvite(),
+                                icon: const Icon(Icons.group_add, color: Colors.white, size: 18),
+                                label: const Text(
+                                  "Share Rescue Invite Link",
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  side: BorderSide(
+                                    color: Colors.white.withOpacity(0.5),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            SizedBox(
+                              width: double.infinity,
+                              height: 48,
+                              child: Obx(
+                                () => ElevatedButton.icon(
+                                  onPressed: _sosController.isCompletingRescue.value
+                                      ? null
+                                      : _sosController.stopActiveSOS,
+                                  icon: _sosController.isCompletingRescue.value
+                                      ? const SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Colors.white,
+                                          ),
+                                        )
+                                      : const Icon(Icons.verified_user),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.green,
+                                    foregroundColor: Colors.white,
+                                  ),
+                                  label: Text(
+                                    _sosController.isCompletingRescue.value
+                                        ? "COMPLETING RESCUE..."
+                                        : "MARK AS SAFE (STOP SOS)",
+                                    style: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              width: double.infinity,
+                              child: TextButton(
+                                onPressed: _sosController.closeAlert,
+                                child: const Text(
+                                  "Keep Running & Close Menu",
+                                  style: TextStyle(
+                                    color: Colors.white54,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
@@ -1856,85 +2012,7 @@ class _MapScreenState extends State<MapScreen> {
           }),
         ],
       ),
-      floatingActionButton: Obx(
-        () => (_sosController.isCountdown.value || _sosController.isSent.value)
-            ? const SizedBox.shrink() // Hide buttons during overlays
-            : SizedBox(
-                width: 170,
-                height:
-                    max(
-                      floatingOffsets.locationBottom,
-                      floatingOffsets.sosBottom,
-                    ) +
-                    100,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    if (_currentPosition != null &&
-                        !_isLoading &&
-                        !_sosController.isLoading.value)
-                      Positioned(
-                        right: 0,
-                        bottom: floatingOffsets.locationBottom,
-                        child: FloatingActionButton(
-                          heroTag: 'locationBtn',
-                          onPressed: () {
-                            if (_currentPosition != null) {
-                              _moveCameraTo(_currentPosition!);
-                            }
-                          },
-                          backgroundColor: Theme.of(
-                            context,
-                          ).colorScheme.primary,
-                          foregroundColor: Theme.of(
-                            context,
-                          ).colorScheme.onPrimary,
-                          child: const Icon(Icons.my_location),
-                        ),
-                      ),
-                    Positioned(
-                      right: 0,
-                      bottom: floatingOffsets.sosBottom,
-                      child: _sosController.isActiveBroadcast.value
-                          ? Obx(
-                              () => FloatingActionButton.extended(
-                                heroTag: 'stopSosBtn',
-                                onPressed:
-                                    _sosController.isCompletingRescue.value
-                                    ? null
-                                    : () => _sosController.stopActiveSOS(),
-                                backgroundColor: Colors.black,
-                                foregroundColor: Colors.greenAccent,
-                                icon: _sosController.isCompletingRescue.value
-                                    ? const SizedBox(
-                                        width: 22,
-                                        height: 22,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                          color: Colors.greenAccent,
-                                        ),
-                                      )
-                                    : const Icon(Icons.verified_user, size: 28),
-                                label: Text(
-                                  _sosController.isCompletingRescue.value
-                                      ? "COMPLETING..."
-                                      : "I'M SAFE",
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 18,
-                                  ),
-                                ),
-                              ),
-                            )
-                          : _PulsingSosButton(
-                              onPressed: () =>
-                                  _sosController.initiateSOSWorkflow(),
-                            ),
-                    ),
-                  ],
-                ),
-              ),
-      ),
+      floatingActionButton: null,
     );
   }
 
@@ -2608,6 +2686,29 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                     ],
                   ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 46,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.redAccent,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: () async {
+                        Navigator.of(context).pop();
+                        await _heatmapController.removeUnsafeZoneObject(zone);
+                      },
+                      icon: const Icon(Icons.delete_outline, size: 18),
+                      label: const Text(
+                        'Remove Heatmap Point',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -2733,9 +2834,627 @@ class _MapScreenState extends State<MapScreen> {
               : 'Unable to leave rescue. Please try again.',
         ),
         backgroundColor: success ? null : Colors.redAccent,
-        behavior: SnackBarBehavior.floating,
       ),
     );
+  }
+
+  void _showZoneDetailsSheet(BuildContext context, UnsafeZone zone) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF191C1F),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFB9000D),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.warning_amber_rounded, color: Colors.yellowAccent, size: 24),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            zone.areaName ?? 'Unsafe Danger Zone',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Active Danger Alert',
+                            style: TextStyle(
+                              color: Colors.redAccent.shade100,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                const Divider(color: Color(0xFF24282C)),
+                const SizedBox(height: 12),
+
+                // Report Details
+                Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: AppColors.onSurfaceVariant, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        zone.reason ?? 'No detailed description provided.',
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const Icon(Icons.access_time, color: AppColors.onSurfaceVariant, size: 18),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Time Window: ${zone.timeStart} - ${zone.timeEnd}',
+                      style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 13),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+
+                // DELETE BUTTON FOR DANGER ZONE REPORT
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFB9000D),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    onPressed: () async {
+                      Navigator.pop(context);
+                      await _heatmapController.removeUnsafeZoneObject(zone);
+                    },
+                    icon: const Icon(Icons.delete_forever),
+                    label: const Text(
+                      'REMOVE DANGER ZONE REPORT',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, letterSpacing: 0.5),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildJourneyGuardOverlay(BuildContext context) {
+    final jgCtrl = JourneyGuardController.instanceOrCreate();
+    final userPos = _currentPosition != null
+        ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
+        : null;
+
+    return Obx(() {
+      final state = jgCtrl.state.value;
+      if (state == JourneyGuardState.idle) {
+        // Search Bar & Heatmap Toggle Overlay on Map Screen
+        return Stack(
+          children: [
+            // Search Bar Trigger Button at Top
+            Positioned(
+              top: 12,
+              left: 16,
+              right: 16,
+              child: GestureDetector(
+                onTap: () => jgCtrl.enterSelectDestinationMode(userLocation: userPos),
+                child: Container(
+                  height: 52,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF191C1F),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFF24282C), width: 1),
+                    boxShadow: const [
+                      BoxShadow(color: Colors.black45, blurRadius: 10, offset: Offset(0, 4)),
+                    ],
+                  ),
+                  child: Row(
+                    children: const [
+                      Icon(Icons.search, color: AppColors.safetyGreen, size: 22),
+                      SizedBox(width: 12),
+                      Text(
+                        'Where are you going?',
+                        style: TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          color: AppColors.onSurfaceVariant,
+                        ),
+                      ),
+                      Spacer(),
+                      Icon(Icons.tune, color: AppColors.onSurfaceVariant, size: 18),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+
+            // Heatmap Toggle Button below search bar on the right side
+            Positioned(
+              top: 72,
+              right: 16,
+              child: Obx(() {
+                final isVisible = _heatmapController.isHeatmapVisible.value;
+                return GestureDetector(
+                  onTap: () => _heatmapController.toggleHeatmap(),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isVisible ? AppColors.signalRed : const Color(0xFF191C1F),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: isVisible ? AppColors.signalRed : const Color(0xFF24282C),
+                        width: 1.5,
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Colors.black45,
+                          blurRadius: 8,
+                          offset: Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          isVisible ? Icons.local_fire_department : Icons.layers_clear_outlined,
+                          color: isVisible ? Colors.amber : AppColors.onSurfaceVariant,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          isVisible ? 'Heatmap: ON' : 'Heatmap: OFF',
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: isVisible ? Colors.white : AppColors.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ],
+        );
+      }
+
+      if (state == JourneyGuardState.selectDestination) {
+        // SELECT DESTINATION MODE: Search Bar Header + Category Chips + Suggestions Drawer
+        return Positioned.fill(
+          child: Container(
+            color: Colors.black.withValues(alpha: 0.75),
+            child: SafeArea(
+              child: Column(
+                children: [
+                  // Top Search Bar
+                  Container(
+                    margin: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF191C1F),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: AppColors.safetyGreen, width: 1.5),
+                      boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 12)],
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.search, color: AppColors.safetyGreen, size: 22),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            autofocus: true,
+                            style: const TextStyle(color: Colors.white, fontSize: 15),
+                            decoration: const InputDecoration(
+                              hintText: 'Where are you going?',
+                              hintStyle: TextStyle(color: AppColors.onSurfaceVariant),
+                              border: InputBorder.none,
+                            ),
+                            onChanged: (val) => jgCtrl.onSearchQueryChanged(val, userPos),
+                          ),
+                        ),
+                        if (jgCtrl.searchQuery.value.isNotEmpty)
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.white70, size: 20),
+                            onPressed: () => jgCtrl.onSearchQueryChanged('', userPos),
+                          ),
+                        IconButton(
+                          icon: const Icon(Icons.arrow_back, color: Colors.white, size: 22),
+                          onPressed: () => jgCtrl.exitDestinationMode(),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // Category Chips (Horizontal Scrollable)
+                  SizedBox(
+                    height: 40,
+                    child: ListView.separated(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      scrollDirection: Axis.horizontal,
+                      itemCount: PlaceSearchService.categories.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (context, idx) {
+                        final cat = PlaceSearchService.categories[idx];
+                        final isSelected = jgCtrl.selectedCategoryKey.value == cat.key;
+                        return ChoiceChip(
+                          label: Text(cat.label),
+                          selected: isSelected,
+                          selectedColor: AppColors.safetyGreen,
+                          backgroundColor: const Color(0xFF191C1F),
+                          labelStyle: TextStyle(
+                            color: isSelected ? Colors.black : Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                          onSelected: (_) {
+                            if (userPos != null) {
+                              jgCtrl.fetchCategoryPlaces(cat.key, userPos);
+                            }
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Search Results / Keyword Suggestions Panel
+                  Expanded(
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF191C1F),
+                        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+                        border: Border.all(color: const Color(0xFF24282C)),
+                      ),
+                      child: jgCtrl.isSearching.value
+                          ? const Center(
+                              child: CircularProgressIndicator(color: AppColors.safetyGreen),
+                            )
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (jgCtrl.searchQuery.value.isNotEmpty) ...[
+                                  Padding(
+                                    padding: const EdgeInsets.all(12),
+                                    child: Wrap(
+                                      spacing: 8,
+                                      runSpacing: 8,
+                                      children: PlaceSearchService.getKeywordSuggestions(jgCtrl.searchQuery.value).map((kw) {
+                                        return ActionChip(
+                                          backgroundColor: const Color(0xFF24282C),
+                                          label: Text(kw, style: const TextStyle(color: AppColors.softCyan, fontSize: 12)),
+                                          onPressed: () {
+                                            jgCtrl.onSearchQueryChanged(kw, userPos);
+                                          },
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ),
+                                  const Divider(color: Color(0xFF24282C), height: 1),
+                                ],
+
+                                // List of Places
+                                Expanded(
+                                  child: jgCtrl.searchResults.isEmpty
+                                      ? const Center(
+                                          child: Text('No places found nearby.\nTry another search keyword.', textAlign: TextAlign.center, style: TextStyle(color: AppColors.onSurfaceVariant)),
+                                        )
+                                      : ListView.separated(
+                                          itemCount: jgCtrl.searchResults.length,
+                                          separatorBuilder: (_, __) => const Divider(color: Color(0xFF24282C), height: 1),
+                                          itemBuilder: (context, index) {
+                                            final item = jgCtrl.searchResults[index];
+                                            return ListTile(
+                                              leading: Container(
+                                                padding: const EdgeInsets.all(8),
+                                                decoration: const BoxDecoration(
+                                                  color: Color(0xFF24282C),
+                                                  shape: BoxShape.circle,
+                                                ),
+                                                child: const Icon(Icons.location_on, color: AppColors.safetyGreen, size: 20),
+                                              ),
+                                              title: Text(item.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
+                                              subtitle: Text(item.address, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
+                                              trailing: Text(
+                                                item.formattedDistance,
+                                                style: const TextStyle(color: AppColors.softCyan, fontWeight: FontWeight.bold, fontSize: 12),
+                                              ),
+                                              onTap: () {
+                                                if (userPos != null) {
+                                                  jgCtrl.selectDestination(item, userPos);
+                                                }
+                                              },
+                                            );
+                                          },
+                                        ),
+                                ),
+                              ],
+                            ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      }
+
+      if (state == JourneyGuardState.routePreview) {
+        // ROUTE PREVIEW MODE: Selected Destination + 3 Route Comparison Options + START BUTTON
+        final dest = jgCtrl.selectedDestination.value;
+
+        return Positioned(
+          bottom: 16,
+          left: 16,
+          right: 16,
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFF191C1F),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: AppColors.safetyGreen, width: 1.5),
+              boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 16)],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Origin & Destination Summary Header
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: const BoxDecoration(color: Color(0xFF24282C), shape: BoxShape.circle),
+                      child: const Icon(Icons.navigation, color: AppColors.safetyGreen, size: 20),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(dest?.name ?? 'Selected Destination', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
+                          Text(dest?.address ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                      onPressed: () => jgCtrl.enterSelectDestinationMode(userLocation: userPos),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                const Divider(color: Color(0xFF24282C), height: 1),
+                const SizedBox(height: 12),
+
+                // Selectable Route Options List
+                if (jgCtrl.isCalculatingRoutes.value)
+                  const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(16),
+                      child: CircularProgressIndicator(color: AppColors.safetyGreen),
+                    ),
+                  )
+                else
+                  Column(
+                    children: List.generate(jgCtrl.routeOptions.length, (index) {
+                      final opt = jgCtrl.routeOptions[index];
+                      final isSelected = jgCtrl.selectedRouteIndex.value == index;
+                      return GestureDetector(
+                        onTap: () => jgCtrl.selectedRouteIndex.value = index,
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: isSelected ? opt.color.withValues(alpha: 0.15) : const Color(0xFF24282C),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: isSelected ? opt.color : Colors.transparent, width: 1.5),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(isSelected ? Icons.radio_button_checked : Icons.radio_button_off, color: opt.color, size: 20),
+                              const SizedBox(width: 10),
+                              Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Text(opt.title, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: opt.color)),
+                                      if (opt.isDefault) ...[
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(color: AppColors.safetyGreen, borderRadius: BorderRadius.circular(4)),
+                                          child: const Text('RECOMMENDED', style: TextStyle(color: Colors.black, fontSize: 9, fontWeight: FontWeight.bold)),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(opt.subtitle, style: const TextStyle(color: Colors.white, fontSize: 12)),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+                  ),
+                const SizedBox(height: 12),
+
+                // Primary Start Button
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.safetyGreen,
+                      foregroundColor: Colors.black,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    onPressed: () => jgCtrl.startJourneyGuard(),
+                    icon: const Icon(Icons.shield, color: Colors.black),
+                    label: const Text('START JOURNEY GUARD', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, letterSpacing: 0.5)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
+
+      if (state == JourneyGuardState.activeGuard) {
+        // ACTIVE JOURNEY GUARD MODE: Header Status Badge + Alerts + End Button
+        final dest = jgCtrl.selectedDestination.value;
+
+        return Positioned(
+          top: 16,
+          left: 16,
+          right: 16,
+          child: Column(
+            children: [
+              // Header Badge
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF191C1F),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.safetyGreen, width: 1.5),
+                  boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 10)],
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: const BoxDecoration(color: AppColors.safetyGreen, shape: BoxShape.circle),
+                      child: const Icon(Icons.shield, color: Colors.black, size: 20),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('🛡 JOURNEY GUARD ACTIVE', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppColors.safetyGreen)),
+                          Text(dest?.name ?? 'En Route', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.white)),
+                        ],
+                      ),
+                    ),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: AppColors.signalRed, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 12)),
+                      onPressed: () => jgCtrl.completeJourney(),
+                      child: const Text('END', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Route Deviation Alert
+              if (jgCtrl.isDeviationDetected.value) ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFB9000D),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.warning, color: Colors.white, size: 20),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'ROUTE DEVIATION DETECTED! You are 350m off route.',
+                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+                        ),
+                      ),
+                      TextButton(
+                        style: TextButton.styleFrom(backgroundColor: Colors.white),
+                        onPressed: () {
+                          if (userPos != null) jgCtrl.recalculateSaferRoute(userPos);
+                        },
+                        child: const Text('Recalculate', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 11)),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+
+              // High-Risk Area Warning
+              if (jgCtrl.isHighRiskAhead.value) ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.warningAmber,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.error_outline, color: Colors.black, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          jgCtrl.highRiskWarning.value,
+                          style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 11),
+                        ),
+                      ),
+                      TextButton(
+                        style: TextButton.styleFrom(backgroundColor: Colors.black),
+                        onPressed: () {
+                          if (userPos != null) jgCtrl.recalculateSaferRoute(userPos);
+                        },
+                        child: const Text('Safer Route', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      }
+
+      return const SizedBox.shrink();
+    });
   }
 }
 
