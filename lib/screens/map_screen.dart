@@ -17,10 +17,13 @@ import '../services/journey_safety_service.dart';
 import '../services/routing_service.dart';
 import '../controllers/sos_listener_controller.dart';
 import '../screens/safe_route_menu_screens.dart';
+import 'emergency_sos_screen.dart';
 import '../controllers/risk_controller.dart';
 import '../controllers/sos_heatmap_controller.dart';
 import '../controllers/journey_guard_controller.dart';
 import '../services/place_search_service.dart';
+import '../services/offline_map_service.dart';
+import '../services/location_fallback_service.dart';
 import '../theme/app_colors.dart';
 
 class MapScreen extends StatefulWidget {
@@ -167,6 +170,12 @@ class _MapScreenState extends State<MapScreen> {
             });
 
             final currentLatLng = LatLng(position.latitude, position.longitude);
+            if (Get.isRegistered<JourneyGuardController>()) {
+              JourneyGuardController.instanceOrCreate().updateLivePosition(
+                currentLatLng,
+                speedMs: position.speed,
+              );
+            }
             if (_isJourneyGuardEnabled) {
               unawaited(_riskController.updateRisk(currentLatLng));
               _evaluateJourneyProgress(currentLatLng);
@@ -250,6 +259,11 @@ class _MapScreenState extends State<MapScreen> {
         _isLoading = false;
       });
 
+      // Task 2: Trigger Wi-Fi auto-download around current location
+      OfflineMapService.instanceOrCreate().triggerAutoDownloadIfEligible(
+        centerLocation: LatLng(position.latitude, position.longitude),
+      );
+
       if (_isJourneyGuardEnabled) {
         _riskController.startPolling(position);
         unawaited(_restoreJourneyRouteIfNeeded());
@@ -267,6 +281,39 @@ class _MapScreenState extends State<MapScreen> {
       }
     } catch (e) {
       if (!mounted) return;
+
+      // Task 4a & 4b: Fallback to LocationFallbackService (Tier 4 last known position or cached centroid)
+      try {
+        final locResult = await LocationFallbackService.resolveLocationForEmergency();
+        if (locResult.position != null) {
+          setState(() {
+            _currentPosition = locResult.position;
+            _isLoading = false;
+          });
+          return;
+        }
+      } catch (_) {}
+
+      final centroid = OfflineMapService.instanceOrCreate().lastCachedRegionCentroid.value;
+      if (centroid != null) {
+        setState(() {
+          _currentPosition = Position(
+            latitude: centroid.latitude,
+            longitude: centroid.longitude,
+            timestamp: DateTime.now(),
+            accuracy: 1000.0,
+            altitude: 0.0,
+            altitudeAccuracy: 0.0,
+            heading: 0.0,
+            headingAccuracy: 0.0,
+            speed: 0.0,
+            speedAccuracy: 0.0,
+          );
+          _isLoading = false;
+        });
+        return;
+      }
+
       setState(() {
         _errorMessage = e.toString().replaceFirst('Exception: ', '');
         _isLoading = false;
@@ -991,12 +1038,15 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                   const SizedBox(height: 10),
                   _ControlToggleTile(
-                    icon: Icons.local_fire_department,
-                    iconColor: Colors.redAccent,
-                    title: 'Unsafe Zones',
-                    subtitle: 'Shows community-reported danger areas on map.',
-                    value: _heatmapController.isHeatmapVisible.value,
-                    onChanged: (_) => _heatmapController.toggleHeatmap(),
+                    icon: Icons.download_for_offline_rounded,
+                    iconColor: Colors.cyanAccent,
+                    title: 'Offline Maps',
+                    subtitle: 'Download map areas for offline emergency navigation.',
+                    value: false,
+                    onChanged: (_) {
+                      Navigator.pop(context);
+                      _showOfflineMapModal(context);
+                    },
                   ),
                 ],
               ),
@@ -1022,6 +1072,47 @@ class _MapScreenState extends State<MapScreen> {
     return Scaffold(
       body: Stack(
         children: [
+          // Task 4d: Persistent Offline Banner Widget
+          Obx(() {
+            final offlineService = OfflineMapService.instanceOrCreate();
+            if (!offlineService.isOffline.value) {
+              return const SizedBox.shrink();
+            }
+            final label = offlineService.offlineLocationLabel.value.isNotEmpty
+                ? offlineService.offlineLocationLabel.value
+                : 'Offline — showing cached map. Some areas may be unavailable.';
+
+            return Positioned(
+              top: mediaQuery.padding.top + 10,
+              left: 16,
+              right: 16,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.amber.shade900.withValues(alpha: 0.95),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 6)],
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.wifi_off_rounded, color: Colors.white, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontFamily: 'Inter',
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
           _currentPosition == null
               ? Center(
                   child: Padding(
@@ -1071,11 +1162,19 @@ class _MapScreenState extends State<MapScreen> {
                     },
                   ),
                   children: [
-                    TileLayer(
-                      urlTemplate:
-                          'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.example.safe_route',
-                    ),
+                    Obx(() {
+                      final offlineService = OfflineMapService.instanceOrCreate();
+                      final isOffline = offlineService.isOffline.value;
+
+                      return TileLayer(
+                        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        userAgentPackageName: 'com.example.safe_route',
+                        additionalOptions: const {
+                          'User-Agent': 'VIGIL_Emergency_App/1.0.0 (safe_route_app)',
+                        },
+                        tileProvider: offlineService.getTileProvider(forceOffline: isOffline),
+                      );
+                    }),
 
                     // Heatmap Unsafe Danger Zones Circles
                     Obx(() {
@@ -1699,258 +1798,65 @@ class _MapScreenState extends State<MapScreen> {
             }
 
             if (_sosController.isSent.value) {
-              return Container(
-                color: Colors.black87,
+              return Positioned(
+                top: 8,
+                left: 16,
+                right: 16,
                 child: SafeArea(
-                  child: Center(
-                    child: SingleChildScrollView(
-                      physics: const BouncingScrollPhysics(),
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      child: Container(
+                  child: Material(
+                    elevation: 8,
+                    borderRadius: BorderRadius.circular(30),
+                    color: const Color(0xFFD32F2F),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(30),
+                      onTap: () {
+                        if (Get.currentRoute != '/EmergencySosScreen') {
+                          Get.to(() => const EmergencySosScreen());
+                        }
+                      },
+                      child: Padding(
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 24,
+                          horizontal: 14,
+                          vertical: 10,
                         ),
-                        margin: const EdgeInsets.symmetric(horizontal: 16),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF191C1F),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: Colors.redAccent, width: 2),
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
+                        child: Row(
                           children: [
-                            const Text(
-                              "🚨 SOS ALERT SENT",
-                              style: TextStyle(
-                                color: Colors.redAccent,
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
+                            const Icon(
+                              Icons.warning_amber_rounded,
+                              color: Colors.white,
+                              size: 22,
+                            ),
+                            const SizedBox(width: 8),
+                            const Expanded(
+                              child: Text(
+                                "🚨 SOS ACTIVE — Tap to View Emergency Dashboard",
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            const SizedBox(height: 12),
-                            Obx(
-                              () => Text(
-                                _sosController.isSendingEmergencyAlerts.value
-                                    ? _sosController.smsStatusMessage.value
-                                    : "Your emergency alert is active and contacts have been processed.",
-                                style: const TextStyle(
-                                  color: Colors.white70,
-                                  fontSize: 14,
+                            const SizedBox(width: 8),
+                            InkWell(
+                              onTap: _sosController.stopActiveSOS,
+                              borderRadius: BorderRadius.circular(16),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
                                 ),
-                                textAlign: TextAlign.center,
-                              ),
-                            ),
-                            Obx(() {
-                              final messages = <String>[];
-                              if (_sosController.isEmergencyRecording.value ||
-                                  _sosController
-                                      .recordingStatusMessage
-                                      .value
-                                      .isNotEmpty) {
-                                messages.add(
-                                  _sosController.recordingStatusMessage.value,
-                                );
-                              }
-                              if (_sosController.isVoiceSOSActive.value &&
-                                  _sosController
-                                      .voiceStatusMessage
-                                      .value
-                                      .isNotEmpty) {
-                                messages.add(
-                                  _sosController.voiceStatusMessage.value,
-                                );
-                              }
-                              if (messages.isEmpty) {
-                                return const SizedBox.shrink();
-                              }
-                              return Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Text(
-                                  messages.join('\n'),
-                                  style: const TextStyle(
-                                    color: Colors.white60,
-                                    fontSize: 12,
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                              );
-                            }),
-                            const SizedBox(height: 12),
-                            Obx(
-                              () => Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.all(12),
                                 decoration: BoxDecoration(
-                                  color: Colors.black.withOpacity(0.22),
-                                  borderRadius: BorderRadius.circular(14),
-                                  border: Border.all(
-                                    color: Colors.white.withOpacity(0.08),
-                                  ),
+                                  color: Colors.green,
+                                  borderRadius: BorderRadius.circular(16),
                                 ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      'Sent: ${_sosController.smsSentCount.value}/${_sosController.smsTotalCount.value}',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      'Failed: ${_sosController.smsFailedCount.value}',
-                                      style: const TextStyle(color: Colors.white70, fontSize: 13),
-                                    ),
-                                    if (_sosController
-                                        .smsRetryStatus
-                                        .value
-                                        .isNotEmpty)
-                                      Padding(
-                                        padding: const EdgeInsets.only(top: 4),
-                                        child: Text(
-                                          _sosController.smsRetryStatus.value,
-                                          style: const TextStyle(
-                                            color: Colors.orangeAccent,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            Obx(
-                              () =>
-                                  _sosController.availableSmsSubscriptions.length >
-                                      1
-                                  ? Padding(
-                                      padding: const EdgeInsets.only(top: 10),
-                                      child: SizedBox(
-                                        width: double.infinity,
-                                        height: 44,
-                                        child: OutlinedButton.icon(
-                                          onPressed: _sosController
-                                              .showSmsSubscriptionPicker,
-                                          icon: const Icon(Icons.sim_card_outlined, size: 18),
-                                          label: const Text('Choose SMS SIM'),
-                                          style: OutlinedButton.styleFrom(
-                                            foregroundColor: Colors.white,
-                                            side: const BorderSide(
-                                              color: Colors.white24,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    )
-                                  : const SizedBox.shrink(),
-                            ),
-                            const SizedBox(height: 16),
-                            SizedBox(
-                              width: double.infinity,
-                              height: 46,
-                              child: ElevatedButton.icon(
-                                onPressed: _sosController.copyMessage,
-                                icon: const Icon(Icons.copy, size: 18),
-                                label: const Text(
-                                  "Copy Message",
-                                  style: TextStyle(fontSize: 15),
-                                ),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.grey[800],
-                                  foregroundColor: Colors.white,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            SizedBox(
-                              width: double.infinity,
-                              height: 46,
-                              child: ElevatedButton.icon(
-                                onPressed: _sosController.shareSOS,
-                                icon: const Icon(Icons.share, size: 18),
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: Colors.redAccent,
-                                  foregroundColor: Colors.white,
-                                ),
-                                label: const Text(
-                                  "Share to Apps",
-                                  style: TextStyle(
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            SizedBox(
-                              width: double.infinity,
-                              height: 44,
-                              child: OutlinedButton.icon(
-                                onPressed: () => RescueInviteController.instance
-                                    .shareActiveRescueInvite(),
-                                icon: const Icon(Icons.group_add, color: Colors.white, size: 18),
-                                label: const Text(
-                                  "Share Rescue Invite Link",
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.bold,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                                style: OutlinedButton.styleFrom(
-                                  side: BorderSide(
-                                    color: Colors.white.withOpacity(0.5),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            SizedBox(
-                              width: double.infinity,
-                              height: 48,
-                              child: Obx(
-                                () => ElevatedButton.icon(
-                                  onPressed: _sosController.isCompletingRescue.value
-                                      ? null
-                                      : _sosController.stopActiveSOS,
-                                  icon: _sosController.isCompletingRescue.value
-                                      ? const SizedBox(
-                                          width: 18,
-                                          height: 18,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: Colors.white,
-                                          ),
-                                        )
-                                      : const Icon(Icons.verified_user),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.green,
-                                    foregroundColor: Colors.white,
-                                  ),
-                                  label: Text(
-                                    _sosController.isCompletingRescue.value
-                                        ? "COMPLETING RESCUE..."
-                                        : "MARK AS SAFE (STOP SOS)",
-                                    style: const TextStyle(
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            SizedBox(
-                              width: double.infinity,
-                              child: TextButton(
-                                onPressed: _sosController.closeAlert,
                                 child: const Text(
-                                  "Keep Running & Close Menu",
+                                  "STOP",
                                   style: TextStyle(
-                                    color: Colors.white54,
-                                    fontSize: 13,
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
                                   ),
                                 ),
                               ),
@@ -3387,6 +3293,109 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               ),
 
+              // Dynamic Live ETA & Journey Progress Dashboard Card
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF191C1F),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: AppColors.borderSubtle, width: 1),
+                  boxShadow: const [BoxShadow(color: Colors.black45, blurRadius: 8, offset: Offset(0, 4))],
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        // Dynamic Estimated Arrival Time
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(
+                              children: [
+                                Icon(Icons.access_time_filled, color: AppColors.safetyGreen, size: 14),
+                                SizedBox(width: 4),
+                                Text(
+                                  'ESTIMATED ARRIVAL (ETA)',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppColors.onSurfaceVariant,
+                                    letterSpacing: 0.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              jgCtrl.etaArrivalTimeString.value,
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w900,
+                                color: AppColors.safetyGreen,
+                                fontFamily: 'Manrope',
+                              ),
+                            ),
+                          ],
+                        ),
+                        // Dynamic Remaining Time & Distance & Speed
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              jgCtrl.etaRemainingTimeString.value,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  '${jgCtrl.remainingDistanceKmString.value} left',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: AppColors.onSurfaceVariant,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.surfaceContainerHigh,
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    jgCtrl.liveSpeedLabel.value,
+                                    style: const TextStyle(fontSize: 10, color: AppColors.softCyan, fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    // Visual Journey Linear Progress Bar
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: jgCtrl.journeyProgressFraction.value,
+                        backgroundColor: AppColors.surfaceContainerHigh,
+                        valueColor: const AlwaysStoppedAnimation<Color>(AppColors.safetyGreen),
+                        minHeight: 4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
               // Route Deviation Alert
               if (jgCtrl.isDeviationDetected.value) ...[
                 const SizedBox(height: 8),
@@ -3455,6 +3464,184 @@ class _MapScreenState extends State<MapScreen> {
 
       return const SizedBox.shrink();
     });
+  }
+
+  void _showOfflineMapModal(BuildContext context) {
+    final offlineService = OfflineMapService.instanceOrCreate();
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surfaceContainer,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return Obx(() {
+          final isDownloading = offlineService.isAutoDownloading.value || offlineService.isManualDownloading.value;
+          final progress = offlineService.downloadProgress.value;
+          final downloadedCount = offlineService.downloadedTilesCount.value;
+          final totalCount = offlineService.totalTilesToDownload.value;
+
+          return FutureBuilder<double>(
+            future: offlineService.getStoreSizeInMB(),
+            builder: (context, snapshot) {
+              final usedMB = snapshot.data ?? 0.0;
+
+              return Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.download_for_offline_rounded, color: AppColors.safetyGreen, size: 28),
+                        const SizedBox(width: 10),
+                        const Expanded(
+                          child: Text(
+                            'Offline Map Management',
+                            style: TextStyle(
+                              fontFamily: 'Manrope',
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: AppColors.onSurface,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close, color: AppColors.onSurfaceVariant),
+                          onPressed: () => Navigator.pop(context),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    // Storage Cap Progress Indicator (Task 2 & 3)
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: AppColors.background,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: AppColors.borderSubtle),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                'Cache Storage Used',
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppColors.onSurface),
+                              ),
+                              Text(
+                                '${usedMB.toStringAsFixed(1)} MB / ${OfflineMapService.maxStorageCapMB.toInt()} MB Cap',
+                                style: const TextStyle(fontSize: 12, fontFamily: 'Inter', color: AppColors.safetyGreen),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          LinearProgressIndicator(
+                            value: (usedMB / OfflineMapService.maxStorageCapMB).clamp(0.0, 1.0),
+                            backgroundColor: AppColors.borderSubtle,
+                            color: AppColors.safetyGreen,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    if (isDownloading) ...[
+                      // Download Progress (Task 3)
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppColors.primaryContainer.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.safetyGreen),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text('Downloading Tiles...', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppColors.onSurface)),
+                                Text('$downloadedCount / $totalCount tiles', style: const TextStyle(fontSize: 11, fontFamily: 'Inter', color: AppColors.onSurfaceVariant)),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            LinearProgressIndicator(value: progress, color: AppColors.safetyGreen),
+                            const SizedBox(height: 8),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton.icon(
+                                onPressed: () => offlineService.cancelCurrentDownload(),
+                                icon: const Icon(Icons.cancel, size: 16, color: Colors.redAccent),
+                                label: const Text('Cancel', style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    // Task 3: Trigger Manual Download
+                    ElevatedButton.icon(
+                      onPressed: (_currentPosition != null && !isDownloading)
+                          ? () async {
+                              final center = LatLng(_currentPosition!.latitude, _currentPosition!.longitude);
+                              await offlineService.triggerManualDownload(
+                                centerLocation: center,
+                                radiusKm: 5.0,
+                                minZoom: 12,
+                                maxZoom: 16,
+                                context: context,
+                              );
+                            }
+                          : null,
+                      icon: const Icon(Icons.download, color: Colors.black),
+                      label: const Text('Download Current Area (~5km Radius)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.black)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.safetyGreen,
+                        minimumSize: const Size.fromHeight(44),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    // Cellular Data Opt-in Switch (Task 2)
+                    SwitchListTile(
+                      title: const Text('Auto-Download on Mobile Data', style: TextStyle(fontSize: 13, color: AppColors.onSurface)),
+                      subtitle: const Text('By default, auto-download runs on Wi-Fi only.', style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                      value: offlineService.allowMobileDataAutoDownload.value,
+                      activeThumbColor: AppColors.safetyGreen,
+                      onChanged: (val) => offlineService.toggleMobileDataAutoDownload(val),
+                    ),
+                    const Divider(color: AppColors.borderSubtle),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              await offlineService.clearTileCache();
+                              if (context.mounted) Navigator.pop(context);
+                            },
+                            icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                            label: const Text('Clear Tile Cache', style: TextStyle(color: Colors.redAccent)),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'OpenStreetMap standard tiles are downloaded conservatively under usage guidelines.',
+                      style: TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant, fontStyle: FontStyle.italic),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        });
+      },
+    );
   }
 }
 

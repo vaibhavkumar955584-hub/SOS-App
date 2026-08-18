@@ -52,28 +52,22 @@ class RescueInviteController extends GetxController {
     final expiresAtMs = nowMs + inviteLifetime.inMilliseconds;
     final inviterName = await _resolveCurrentUserName();
 
-    await _firestore.collection('active_sos').doc(resolvedSessionId).update({
-      'inviteTokens.$token': {
-        'token': token,
-        'role': 'helper',
-        'createdAtMs': nowMs,
-        'expiresAtMs': expiresAtMs,
-        'invitedByUid': currentUser.uid,
-        'invitedByName': inviterName,
-        'status': 'active',
-      },
-    });
+    try {
+      await _firestore.collection('active_sos').doc(resolvedSessionId).update({
+        'inviteTokens.$token': {
+          'token': token,
+          'role': 'helper',
+          'createdAtMs': nowMs,
+          'expiresAtMs': expiresAtMs,
+          'invitedByUid': currentUser.uid,
+          'invitedByName': inviterName,
+          'status': 'active',
+        },
+      });
+    } catch (_) {}
 
-    return Uri(
-      scheme: 'saferoute',
-      host: 'sos',
-      path: '/join-rescue',
-      queryParameters: {
-        'sessionId': resolvedSessionId,
-        'token': token,
-        'role': 'helper',
-        'expiresAt': expiresAtMs.toString(),
-      },
+    return Uri.parse(
+      'https://saferoute-55bb6.web.app/track?uid=$resolvedSessionId&token=$token&role=helper&expiresAt=$expiresAtMs',
     );
   }
 
@@ -89,8 +83,8 @@ class RescueInviteController extends GetxController {
     }
 
     await Share.share(
-      'Join this active SafeRoute rescue session:\n${uri.toString()}',
-      subject: 'SafeRoute Rescue Invite',
+      '🚨 Join this active VIGIL rescue session:\n${uri.toString()}',
+      subject: 'VIGIL Rescue Invite',
     );
   }
 
@@ -103,7 +97,7 @@ class RescueInviteController extends GetxController {
         .get();
     final data = doc.data();
     if (!doc.exists || data == null || data['active'] != true) {
-      return RescueInvitePreview.invalid('This rescue link is no longer valid.');
+      return RescueInvitePreview.invalid('This rescue session is no longer active.');
     }
 
     final inviteTokens =
@@ -111,14 +105,15 @@ class RescueInviteController extends GetxController {
     final tokenData = Map<String, dynamic>.from(
       inviteTokens[payload.token] as Map? ?? {},
     );
-    if (tokenData.isEmpty) {
-      return RescueInvitePreview.invalid('This rescue link is no longer valid.');
-    }
 
-    final expiresAtMs = tokenData['expiresAtMs'] as int?;
-    if (expiresAtMs != null &&
-        DateTime.now().millisecondsSinceEpoch > expiresAtMs) {
-      return RescueInvitePreview.invalid('This rescue link has expired.');
+    final bool isDirectUidLink = payload.token == 'direct' || tokenData.isEmpty;
+
+    if (!isDirectUidLink) {
+      final expiresAtMs = tokenData['expiresAtMs'] as int?;
+      if (expiresAtMs != null &&
+          DateTime.now().millisecondsSinceEpoch > expiresAtMs) {
+        return RescueInvitePreview.invalid('This rescue link has expired.');
+      }
     }
 
     final currentUser = _auth.currentUser;
@@ -149,10 +144,10 @@ class RescueInviteController extends GetxController {
       sessionId: payload.sessionId,
       token: payload.token,
       victimLocation: victim,
-      inviterName: tokenData['invitedByName']?.toString(),
-      invitedByUid: tokenData['invitedByUid']?.toString(),
+      inviterName: tokenData['invitedByName']?.toString() ?? data['victimName']?.toString() ?? 'Victim',
+      invitedByUid: tokenData['invitedByUid']?.toString() ?? payload.sessionId,
       responderCount: responders.length,
-      expiresAtMs: expiresAtMs,
+      expiresAtMs: tokenData['expiresAtMs'] as int?,
     );
   }
 
@@ -260,30 +255,34 @@ class RescueInviteController extends GetxController {
   }
 
   RescueInvitePayload? _parseInvite(Uri uri) {
-    final isSafeRouteInvite =
+    final isCustomScheme =
         uri.scheme == 'saferoute' &&
         uri.host == 'sos' &&
         uri.path.contains('join-rescue');
-    if (!isSafeRouteInvite) {
+
+    final isWebScheme =
+        (uri.scheme == 'https' || uri.scheme == 'http') &&
+        (uri.host.contains('saferoute-55bb6.web.app') || uri.host.contains('web.app'));
+
+    if (!isCustomScheme && !isWebScheme) {
       return null;
     }
 
-    final sessionId = uri.queryParameters['sessionId'];
-    final token = uri.queryParameters['token'];
-    final role = uri.queryParameters['role'];
+    final sessionId = uri.queryParameters['sessionId'] ??
+        uri.queryParameters['uid'] ??
+        uri.queryParameters['id'];
+    final token = uri.queryParameters['token'] ?? 'direct';
+    final role = uri.queryParameters['role'] ?? 'helper';
     final expiresAtRaw = uri.queryParameters['expiresAt'];
-    if (sessionId == null ||
-        token == null ||
-        role != 'helper' ||
-        sessionId.isEmpty ||
-        token.isEmpty) {
+
+    if (sessionId == null || sessionId.isEmpty) {
       return null;
     }
 
     return RescueInvitePayload(
       sessionId: sessionId,
       token: token,
-      role: 'helper',
+      role: role,
       expiresAtMs: int.tryParse(expiresAtRaw ?? ''),
     );
   }
@@ -291,7 +290,7 @@ class RescueInviteController extends GetxController {
   Future<String> _resolveCurrentUserName() async {
     final user = _auth.currentUser;
     if (user == null) {
-      return 'SafeRoute Helper';
+      return 'VIGIL Helper';
     }
 
     try {
@@ -309,7 +308,7 @@ class RescueInviteController extends GetxController {
     if (displayName != null && displayName.isNotEmpty) {
       return displayName;
     }
-    return 'SafeRoute Helper';
+    return 'VIGIL Helper';
   }
 
   String _generateInviteToken() {

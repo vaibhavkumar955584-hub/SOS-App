@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'app_colors.dart';
 
-/// SafeRoute Precision Design System - Flutter ThemeData
+/// VIGIL Precision Design System - Flutter ThemeData
 class AppTheme {
   static ThemeData get darkTheme {
     return ThemeData(

@@ -5,9 +5,11 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   app_links
   cloud_firestore
+  connectivity_plus
   firebase_auth
   firebase_core
   geolocator_windows
+  objectbox_flutter_libs
   permission_handler_windows
   record_windows
   share_plus

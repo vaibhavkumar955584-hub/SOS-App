@@ -16,6 +16,7 @@ import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.media.MediaScannerConnection
 import android.provider.MediaStore
 import android.view.WindowManager
 import android.telephony.SmsManager
@@ -29,7 +30,13 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.LocationSettingsRequest
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.Priority
+import com.google.android.gms.location.Geofence
+import com.google.android.gms.location.GeofencingClient
+import com.google.android.gms.location.GeofencingRequest
 import com.google.android.gms.common.api.ResolvableApiException
+import androidx.core.content.pm.ShortcutInfoCompat
+import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.core.graphics.drawable.IconCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -39,6 +46,13 @@ import java.io.FileInputStream
 
 class MainActivity : FlutterActivity() {
     private val smsChannelName = "safe_route/sms"
+    private val geofenceChannelName = "safe_route/geofence"
+    private val shortcutChannelName = "safe_route/shortcut"
+    private var shortcutChannel: MethodChannel? = null
+    private var pendingTriggerSource: String? = null
+
+    private lateinit var geofencingClient: GeofencingClient
+    private var geofencePendingIntent: PendingIntent? = null
     private var pendingContactPickerResult: MethodChannel.Result? = null
     private val REQUEST_CODE_PICK_CONTACT = 1002
     private var pendingImagePickerResult: MethodChannel.Result? = null
@@ -46,6 +60,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        registerDynamicShortcuts()
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
@@ -63,14 +79,114 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun registerDynamicShortcuts() {
+        try {
+            val sosIntent = Intent(this, SosShortcutActivity::class.java).apply {
+                action = Intent.ACTION_VIEW
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("triggerSource", "shortcut")
+            }
+
+            val sosShortcut = ShortcutInfoCompat.Builder(this, "sos_trigger_shortcut")
+                .setShortLabel("Emergency SOS")
+                .setLongLabel("Trigger Emergency SOS (2s Hold)")
+                .setIcon(IconCompat.createWithResource(this, R.drawable.sos_widget_circle))
+                .setIntent(sosIntent)
+                .build()
+
+            ShortcutManagerCompat.setDynamicShortcuts(this, listOf(sosShortcut))
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.action == "ACTION_TRIGGER_SOS") {
+            val source = intent.getStringExtra("triggerSource") ?: "widget"
+            pendingTriggerSource = source
+            shortcutChannel?.invokeMethod("triggerSos", mapOf("source" to source))
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, shortcutChannelName)
+        shortcutChannel = channel
+        channel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getPendingTriggerSource" -> {
+                    val src = pendingTriggerSource
+                    pendingTriggerSource = null
+                    result.success(src)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        handleIntent(intent)
+
+        geofencingClient = LocationServices.getGeofencingClient(this)
+
+        val geofenceChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, geofenceChannelName)
+
+        GeofenceBroadcastReceiver.eventListener = { payload ->
+            Handler(Looper.getMainLooper()).post {
+                geofenceChannel.invokeMethod("onGeofenceEvent", payload)
+            }
+        }
+
+        geofenceChannel.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "registerGeofences" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val zones = call.argument<List<Map<String, Any>>>("zones") ?: emptyList()
+                    registerGeofencesNative(zones, result)
+                }
+                "removeGeofences" -> {
+                    val ids = call.argument<List<String>>("ids") ?: emptyList()
+                    removeGeofencesNative(ids, result)
+                }
+                "removeAllGeofences" -> {
+                    removeAllGeofencesNative(result)
+                }
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             smsChannelName,
         ).setMethodCallHandler { call, result ->
             when (call.method) {
+                "pinSosWidget" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        val appWidgetManager = getSystemService(android.appwidget.AppWidgetManager::class.java)
+                        val myProvider = android.content.ComponentName(this, SosAppWidgetProvider::class.java)
+                        if (appWidgetManager.isRequestPinAppWidgetSupported) {
+                            val pinnedWidgetCallbackIntent = Intent(this, MainActivity::class.java)
+                            val successCallback = PendingIntent.getActivity(
+                                this, 0, pinnedWidgetCallbackIntent,
+                                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                            )
+                            appWidgetManager.requestPinAppWidget(myProvider, null, successCallback)
+                            result.success(true)
+                        } else {
+                            result.success(false)
+                        }
+                    } else {
+                        result.success(false)
+                    }
+                }
+
                 "pickImageFromGallery" -> {
                     pickImageFromGallery(result)
                 }
@@ -183,6 +299,10 @@ class MainActivity : FlutterActivity() {
                     }
 
                     result.success(openFile(path))
+                }
+
+                "getTelephonyNetworkInfo" -> {
+                    result.success(getTelephonyNetworkInfo())
                 }
 
                 else -> result.notImplemented()
@@ -383,6 +503,26 @@ class MainActivity : FlutterActivity() {
         return if (level in 0..100) level else null
     }
 
+    private fun getTelephonyNetworkInfo(): Map<String, Any?> {
+        return try {
+            val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+                ?: return mapOf("success" to false)
+            val networkOperatorName = telephonyManager.networkOperatorName ?: ""
+            val simOperatorName = telephonyManager.simOperatorName ?: ""
+            val networkCountryIso = telephonyManager.networkCountryIso ?: ""
+            val simCountryIso = telephonyManager.simCountryIso ?: ""
+            mapOf(
+                "success" to true,
+                "networkOperatorName" to networkOperatorName,
+                "simOperatorName" to simOperatorName,
+                "networkCountryIso" to networkCountryIso.uppercase(),
+                "simCountryIso" to simCountryIso.uppercase(),
+            )
+        } catch (e: Exception) {
+            mapOf("success" to false, "errorMessage" to e.message)
+        }
+    }
+
     private fun saveRecordingToDownloads(
         sourcePath: String,
         displayName: String,
@@ -396,25 +536,24 @@ class MainActivity : FlutterActivity() {
                 )
             }
 
+            var exportedPath = ""
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val values =
-                    ContentValues().apply {
-                        put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
-                        put(MediaStore.MediaColumns.MIME_TYPE, "audio/mp4")
-                        put(MediaStore.MediaColumns.IS_PENDING, 1)
-                        put(
-                            MediaStore.MediaColumns.RELATIVE_PATH,
-                            "${Environment.DIRECTORY_DOWNLOADS}/SafeRoute/SOS_Recordings",
-                        )
-                    }
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "audio/mp4")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    put(
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                        "${Environment.DIRECTORY_DOWNLOADS}/SafeRoute/SOS_Recordings",
+                    )
+                }
 
                 val resolver = applicationContext.contentResolver
-                val uri =
-                    resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                        ?: return mapOf(
-                            "success" to false,
-                            "errorMessage" to "Unable to create destination file.",
-                        )
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: return mapOf(
+                        "success" to false,
+                        "errorMessage" to "Unable to create destination file.",
+                    )
 
                 FileInputStream(sourceFile).use { input ->
                     resolver.openOutputStream(uri)?.use { output ->
@@ -429,27 +568,51 @@ class MainActivity : FlutterActivity() {
                 values.put(MediaStore.MediaColumns.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
 
-                mapOf(
-                    "success" to true,
-                    "publicPath" to "Download/SafeRoute/SOS_Recordings/$displayName",
-                )
-            } else {
-                val targetDir =
-                    File(
-                        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                        "SafeRoute/SOS_Recordings",
-                    )
-                if (!targetDir.exists()) {
-                    targetDir.mkdirs()
-                }
-
-                val targetFile = File(targetDir, displayName)
-                sourceFile.copyTo(targetFile, overwrite = true)
-                mapOf(
-                    "success" to true,
-                    "publicPath" to targetFile.absolutePath,
-                )
+                exportedPath = "/storage/emulated/0/${Environment.DIRECTORY_DOWNLOADS}/SafeRoute/SOS_Recordings/$displayName"
             }
+
+            // Always write legacy public copy to Downloads/SafeRoute/SOS_Recordings & Music/SoundRecorder for maximum compatibility
+            val targetDir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "SafeRoute/SOS_Recordings",
+            )
+            if (!targetDir.exists()) {
+                targetDir.mkdirs()
+            }
+            val targetFile = File(targetDir, displayName)
+            sourceFile.copyTo(targetFile, overwrite = true)
+            exportedPath = targetFile.absolutePath
+
+            // Also copy to SoundRecorder public folder so com.android.soundrecorder picks it up
+            try {
+                val soundRecorderDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+                    "SoundRecorder",
+                )
+                if (!soundRecorderDir.exists()) {
+                    soundRecorderDir.mkdirs()
+                }
+                val srFile = File(soundRecorderDir, displayName)
+                sourceFile.copyTo(srFile, overwrite = true)
+                MediaScannerConnection.scanFile(
+                    applicationContext,
+                    arrayOf(srFile.absolutePath, targetFile.absolutePath),
+                    arrayOf("audio/m4a", "audio/mp4", "audio/*"),
+                    null
+                )
+            } catch (_: Exception) {}
+
+            MediaScannerConnection.scanFile(
+                applicationContext,
+                arrayOf(targetFile.absolutePath),
+                arrayOf("audio/m4a", "audio/mp4", "audio/*"),
+                null
+            )
+
+            mapOf(
+                "success" to true,
+                "publicPath" to exportedPath,
+            )
         } catch (e: Exception) {
             mapOf(
                 "success" to false,
@@ -502,17 +665,61 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun makeDirectCall(phoneNumber: String, result: MethodChannel.Result) {
+        val cleanNumber = phoneNumber.replace("[^0-9+]".toRegex(), "")
+        val isEmergencyNumber = cleanNumber == "112" || cleanNumber == "911" || cleanNumber == "100" || cleanNumber == "101" || cleanNumber == "102"
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            result.success(mapOf("success" to false, "errorMessage" to "CALL_PHONE permission not granted."))
+            // No CALL_PHONE permission — open dialer as last resort
+            try {
+                val fallbackIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$cleanNumber")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(fallbackIntent)
+                result.success(mapOf("success" to true, "openedDialer" to true, "isEmergency" to isEmergencyNumber))
+            } catch (ex: Exception) {
+                result.success(mapOf("success" to false, "errorMessage" to (ex.message ?: "Direct call failed.")))
+            }
             return
         }
+
+        // ── Attempt 1: Plain ACTION_CALL (no extras — avoids MIUI emergency interception) ──
         try {
-            val intent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$phoneNumber"))
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val uri = Uri.parse("tel:$cleanNumber")
+            val intent = Intent(Intent.ACTION_CALL, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // DO NOT set IS_EMERGENCY_CALL — MIUI intercepts it and shows dial-pad freeze
+            }
             startActivity(intent)
-            result.success(mapOf("success" to true))
-        } catch (e: Exception) {
-            result.success(mapOf("success" to false, "errorMessage" to (e.message ?: "Direct call failed.")))
+            result.success(mapOf("success" to true, "openedDialer" to false, "isEmergency" to isEmergencyNumber))
+            return
+        } catch (_: Exception) {
+            // Attempt 1 failed, continue to retry strategies
+        }
+
+        // ── Attempt 2 (emergency only): Retry ACTION_CALL with CLEAR_TOP to force through ──
+        if (isEmergencyNumber) {
+            try {
+                val uri = Uri.parse("tel:$cleanNumber")
+                val retryIntent = Intent(Intent.ACTION_CALL, uri).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }
+                startActivity(retryIntent)
+                result.success(mapOf("success" to true, "openedDialer" to false, "isEmergency" to true))
+                return
+            } catch (_: Exception) {
+                // Attempt 2 also failed, fall through
+            }
+        }
+
+        // ── Attempt 3 (non-emergency fallback): ACTION_DIAL opens keypad ──
+        try {
+            val fallbackIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$cleanNumber")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(fallbackIntent)
+            result.success(mapOf("success" to true, "openedDialer" to true, "isEmergency" to isEmergencyNumber))
+        } catch (ex: Exception) {
+            result.success(mapOf("success" to false, "errorMessage" to (ex.message ?: "Direct call failed.")))
         }
     }
 
@@ -655,6 +862,105 @@ class MainActivity : FlutterActivity() {
             }
             pendingContactPickerResult?.success(mapOf("success" to false, "errorMessage" to "No contact selected."))
             pendingContactPickerResult = null
+        }
+    }
+
+    private fun getGeofencePendingIntent(): PendingIntent {
+        if (geofencePendingIntent != null) {
+            return geofencePendingIntent!!
+        }
+        val intent = Intent(this, GeofenceBroadcastReceiver::class.java)
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_MUTABLE else 0)
+        geofencePendingIntent = PendingIntent.getBroadcast(this, 9001, intent, flags)
+        return geofencePendingIntent!!
+    }
+
+    private fun registerGeofencesNative(zones: List<Map<String, Any>>, result: MethodChannel.Result) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            result.error("PERMISSION_DENIED", "ACCESS_FINE_LOCATION is required for Geofencing", null)
+            return
+        }
+
+        if (zones.isEmpty()) {
+            result.success(mapOf("success" to true, "count" to 0))
+            return
+        }
+
+        val geofenceList = ArrayList<Geofence>()
+        for (zone in zones) {
+            val id = zone["id"]?.toString() ?: continue
+            val lat = (zone["latitude"] as? Number)?.toDouble() ?: continue
+            val lng = (zone["longitude"] as? Number)?.toDouble() ?: continue
+            val radius = (zone["radius"] as? Number)?.toFloat() ?: 400f
+
+            val geofence = Geofence.Builder()
+                .setRequestId(id)
+                .setCircularRegion(lat, lng, radius)
+                .setExpirationDuration(Geofence.NEVER_EXPIRE)
+                .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_EXIT)
+                .build()
+
+            geofenceList.add(geofence)
+        }
+
+        if (geofenceList.isEmpty()) {
+            result.success(mapOf("success" to true, "count" to 0))
+            return
+        }
+
+        val request = GeofencingRequest.Builder()
+            .setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER)
+            .addGeofences(geofenceList)
+            .build()
+
+        try {
+            geofencingClient.addGeofences(request, getGeofencePendingIntent()).run {
+                addOnSuccessListener {
+                    android.util.Log.i("MainActivity", "Successfully registered ${geofenceList.size} native geofences.")
+                    result.success(mapOf("success" to true, "count" to geofenceList.size))
+                }
+                addOnFailureListener { e ->
+                    android.util.Log.e("MainActivity", "Failed to register geofences: ${e.message}")
+                    result.error("GEOFENCE_REGISTRATION_FAILED", e.message, null)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Exception adding geofences: ${e.message}")
+            result.error("GEOFENCE_EXCEPTION", e.message, null)
+        }
+    }
+
+    private fun removeGeofencesNative(ids: List<String>, result: MethodChannel.Result) {
+        if (ids.isEmpty()) {
+            result.success(mapOf("success" to true))
+            return
+        }
+        try {
+            geofencingClient.removeGeofences(ids).run {
+                addOnSuccessListener {
+                    result.success(mapOf("success" to true))
+                }
+                addOnFailureListener { e ->
+                    result.error("GEOFENCE_REMOVE_FAILED", e.message, null)
+                }
+            }
+        } catch (e: Exception) {
+            result.error("GEOFENCE_REMOVE_EXCEPTION", e.message, null)
+        }
+    }
+
+    private fun removeAllGeofencesNative(result: MethodChannel.Result) {
+        try {
+            geofencingClient.removeGeofences(getGeofencePendingIntent()).run {
+                addOnSuccessListener {
+                    result.success(mapOf("success" to true))
+                }
+                addOnFailureListener { e ->
+                    result.error("GEOFENCE_REMOVE_ALL_FAILED", e.message, null)
+                }
+            }
+        } catch (e: Exception) {
+            result.error("GEOFENCE_REMOVE_ALL_EXCEPTION", e.message, null)
         }
     }
 }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -12,6 +13,8 @@ import 'controllers/sos_listener_controller.dart';
 import 'services/background_shake_service.dart';
 import 'firebase_options.dart';
 import 'theme/app_theme.dart';
+import 'services/offline_map_service.dart';
+import 'services/emergency_dispatch_engine.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,13 +28,19 @@ void main() async {
     );
   }
 
-  await initializeBackgroundService();
+  // Initialize native widget/shortcut MethodChannel listener
+  EmergencyDispatchEngine.initializeShortcutListener();
 
-  runApp(const SafeRouteApp());
+  // Launch UI immediately on main thread
+  runApp(const VigilApp());
+
+  // Non-blocking background initializations after UI launch
+  unawaited(OfflineMapService.initializeStore());
+  unawaited(initializeBackgroundService());
 }
 
-class SafeRouteApp extends StatelessWidget {
-  const SafeRouteApp({super.key});
+class VigilApp extends StatelessWidget {
+  const VigilApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -57,7 +66,7 @@ class SafeRouteApp extends StatelessWidget {
       Get.put(RescueStatsController());
     }
     return GetMaterialApp(
-      title: 'SafeRoute',
+      title: 'VIGIL',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
       darkTheme: AppTheme.darkTheme,

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">VIGIL SafeRoute</string>
+    <string name="sos_widget_description">Emergency SOS Quick-Trigger Widget</string>
+    <string name="shortcut_sos_short">Emergency SOS</string>
+    <string name="shortcut_sos_long">Trigger Emergency SOS (2s Hold)</string>
+</resources>

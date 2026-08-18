@@ -15,15 +15,19 @@ import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:vibration/vibration.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'emergency_message_helper.dart';
+import '../controllers/history_controller.dart';
 import '../firebase_options.dart';
 
-const double _strongShakeMagnitudeThreshold = 18.5;
-const double _axisDirectionThreshold = 11.0;
-const int _requiredStrongOscillations = 3;
-const int _shakeSequenceWindowMs = 1800;
-const int _minShakeGapMs = 120;
-const int _maxShakeGapMs = 700;
+const double _strongShakeMagnitudeThreshold = 26.5;
+const double _axisDirectionThreshold = 16.0;
+const double _violentSnatchMagnitudeThreshold = 36.0;
+const int _requiredStrongOscillations = 4;
+const int _shakeSequenceWindowMs = 1700;
+const int _minShakeGapMs = 90;
+const int _maxShakeGapMs = 600;
 const int _sosCooldownMs = 10000;
 const int _cancelCountdownSeconds = 3;
 const int _voiceSosCooldownMs = 15000;
@@ -48,9 +52,14 @@ const String _sosStatePrefsKey = 'is_sos_active';
 const MethodChannel _platformChannel = MethodChannel('safe_route/sms');
 
 bool matchesEmergencyVoicePhrase(String spokenWords) {
+  if (spokenWords.trim().isEmpty) {
+    return false;
+  }
+
+  // Preserve Unicode letters, marks (vowel signs/matras), numbers and whitespace
   final normalized = spokenWords
       .toLowerCase()
-      .replaceAll(RegExp(r'[^a-z0-9\s]'), ' ')
+      .replaceAll(RegExp(r'[^\p{L}\p{M}\p{N}\s]', unicode: true), ' ')
       .replaceAll(RegExp(r'\s+'), ' ')
       .trim();
 
@@ -58,8 +67,87 @@ bool matchesEmergencyVoicePhrase(String spokenWords) {
     return false;
   }
 
-  const triggerPhrases = ['help me', 'save me', 'sos', 'emergency'];
-  return triggerPhrases.any((phrase) => normalized.contains(phrase));
+  const triggerPhrases = [
+    // English keywords & variations
+    'help me please',
+    'please help me',
+    'please help',
+    'help please',
+    'help me',
+    'help us',
+    'help',
+    'save me',
+    'save us',
+    'save',
+    'sos',
+    'emergency',
+    'medical emergency',
+    'danger',
+    'police',
+    'call police',
+    'stop',
+    'attack',
+    'someone help',
+    'i need help',
+    'need help',
+
+    // Hinglish keywords & phonetic variations
+    'bachao mujhe',
+    'mujhe bachao',
+    'bachao bachao',
+    'koi bachao',
+    'bhai bachao',
+    'bachao',
+    'bchao',
+    'madad karo',
+    'meri madad karo',
+    'madad',
+    'police bulao',
+    'khatra',
+    'chhedkhani',
+    'raksha karo',
+    'sahayata karo',
+    'sahayata',
+    'jaan bachao',
+
+    // Hindi (Devanagari) keywords
+    'मुझे बचाओ',
+    'बचाओ मुझे',
+    'बचाओ बचाओ',
+    'कोई बचाओ',
+    'बचाओ',
+    'मदद करो',
+    'मेरी मदद करो',
+    'मदद',
+    'सहायता',
+    'हेल्प मी',
+    'प्लीज हेल्प',
+    'हेल्प',
+    'पुलिस बुलाओ',
+    'पुलिस',
+    'इमरजेंसी',
+    'खतरा',
+    'हमला',
+    'रोको',
+    'जान बचाओ',
+  ];
+
+  // 1. Check direct phrase match
+  for (final phrase in triggerPhrases) {
+    if (normalized.contains(phrase)) {
+      return true;
+    }
+  }
+
+  // 2. Token / single-word matching
+  final words = normalized.split(' ');
+  for (final word in words) {
+    if (triggerPhrases.contains(word)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 String buildSosRecordingFileName(
@@ -82,7 +170,7 @@ Future<void> initializeBackgroundService() async {
 
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
     'safe_route_sos_channel',
-    'SafeRoute SOS Service',
+    'VIGIL SOS Service',
     description:
         'Actively monitors hardware sensors for SOS shakes even when locked.',
     importance: Importance.high,
@@ -131,7 +219,7 @@ Future<void> initializeBackgroundService() async {
       autoStartOnBoot: false,
       isForegroundMode: true,
       notificationChannelId: _backgroundServiceNotificationChannelId,
-      initialNotificationTitle: 'SafeRoute Active',
+      initialNotificationTitle: 'VIGIL Active',
       initialNotificationContent: 'Monitoring hardware shakes for emergencies.',
       foregroundServiceNotificationId: 888,
       foregroundServiceTypes: const [
@@ -168,7 +256,7 @@ void onStart(ServiceInstance service) async {
 
   final List<String> notifiedSosList = [];
   final prefs = await SharedPreferences.getInstance();
-  final detector = _EmergencyShakeDetector();
+  final detector = EmergencyShakeDetector();
   final speechToText = SpeechToText();
   final recorder = AudioRecorder();
   final androidService = service is AndroidServiceInstance ? service : null;
@@ -176,6 +264,11 @@ void onStart(ServiceInstance service) async {
   bool isCountdownActive = false;
   bool isListening = false;
   bool isRecording = false;
+  bool isSpeechToTextInitialized = false;
+  int voiceRestartCount = 0;
+  String lastVoiceTranscript = '';
+  String lastVoiceError = 'NONE';
+  String currentVoiceState = 'IDLE';
   var isShakeEnabled = prefs.getBool(_shakeSosEnabledPrefsKey) ?? false;
   DateTime? lastVoiceTriggerAt;
   StreamSubscription<UserAccelerometerEvent>? accelerometerSubscription;
@@ -195,9 +288,6 @@ void onStart(ServiceInstance service) async {
   }
 
   String idleMonitoringContent() {
-    if (isRecording) {
-      return 'SOS audio recording active in background.';
-    }
     final voiceEnabled = prefs.getBool(_voiceSosEnabledPrefsKey) ?? false;
     if (voiceEnabled && isShakeEnabled) {
       return 'Listening for voice SOS and monitoring hardware shakes.';
@@ -206,9 +296,9 @@ void onStart(ServiceInstance service) async {
       return 'Listening for voice SOS in the background.';
     }
     if (isShakeEnabled) {
-      return 'Monitoring hardware shakes for emergencies.';
+      return 'Monitoring hardware shake gestures in background.';
     }
-    return 'SafeRoute background safety service active.';
+    return 'VIGIL background safety service active.';
   }
 
   Future<void> emitVoiceStatus(
@@ -221,8 +311,12 @@ void onStart(ServiceInstance service) async {
       'status': status,
       'isActive': isActive,
       'detail': detail,
+      'state': currentVoiceState,
+      'lastTranscript': lastVoiceTranscript,
+      'restartCount': voiceRestartCount,
+      'lastError': lastVoiceError,
     });
-    debugPrint('[Voice SOS] $status${detail == null ? '' : ' - $detail'}');
+    debugPrint('[Voice SOS] [$currentVoiceState] $status${detail == null ? '' : ' - $detail'} (restarts: $voiceRestartCount)');
   }
 
   Future<void> emitRecordingStatus(
@@ -358,63 +452,16 @@ void onStart(ServiceInstance service) async {
     return contacts.toSet().toList();
   }
 
-  Future<String> resolveBackgroundVictimName(String uid) async {
-    try {
-      final doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(uid)
-          .get();
-      final name = doc.data()?['name']?.toString().trim();
-      if (name != null && name.isNotEmpty) {
-        return name;
-      }
-    } catch (e) {
-      debugPrint('[SOS SMS] Failed to resolve user name in background: $e');
-    }
-    return 'A SafeRoute user';
-  }
-
-  Future<int?> getBatteryLevel() async {
-    try {
-      final level = await _platformChannel.invokeMethod<int>('getBatteryLevel');
-      if (level != null && level >= 0 && level <= 100) {
-        return level;
-      }
-    } catch (e) {
-      debugPrint('[SOS SMS] Failed to read battery level in background: $e');
-    }
-    return null;
-  }
-
   Future<String> buildBackgroundSosMessage({
     required String uid,
     required Position position,
   }) async {
-    final victimName = await resolveBackgroundVictimName(uid);
-    final batteryLevel = await getBatteryLevel();
-    final timestamp = DateTime.now();
-    final hour12 = timestamp.hour == 0
-        ? 12
-        : (timestamp.hour > 12 ? timestamp.hour - 12 : timestamp.hour);
-    final suffix = timestamp.hour >= 12 ? 'PM' : 'AM';
-    final timestampLabel =
-        '${timestamp.year.toString().padLeft(4, '0')}-'
-        '${timestamp.month.toString().padLeft(2, '0')}-'
-        '${timestamp.day.toString().padLeft(2, '0')} '
-        '${hour12.toString().padLeft(2, '0')}:'
-        '${timestamp.minute.toString().padLeft(2, '0')} '
-        '$suffix';
-
-    final lines = <String>[
-      'EMERGENCY',
-      '$victimName needs help immediately.',
-      'Time: $timestampLabel',
-      if (batteryLevel != null) 'Battery: $batteryLevel%',
-      'Location: https://maps.google.com/?q='
-          '${position.latitude.toStringAsFixed(6)},'
-          '${position.longitude.toStringAsFixed(6)}',
-    ];
-    return lines.join('\n');
+    return EmergencyMessageHelper.buildSosMessage(
+      uid: uid,
+      lat: position.latitude.toStringAsFixed(6),
+      lng: position.longitude.toStringAsFixed(6),
+      sessionId: uid,
+    );
   }
 
   Future<NativeSmsSendResult> sendBackgroundDirectSms(
@@ -608,6 +655,22 @@ void onStart(ServiceInstance service) async {
           partNumber: currentPart,
         );
 
+        if (privatePath != null &&
+            privatePath.isNotEmpty &&
+            File(privatePath).existsSync() &&
+            File(privatePath).lengthSync() > 0 &&
+            sessionId != null &&
+            sessionId.isNotEmpty) {
+          final startedMs = prefs.getInt(_recordingStartedAtPrefsKey) ?? DateTime.now().millisecondsSinceEpoch;
+          final durationSecs = (DateTime.now().millisecondsSinceEpoch - startedMs) ~/ 1000;
+          await HistoryController.instanceOrCreate().updateSosRecordingInfo(
+            sosId: sessionId,
+            recordingFilePath: privatePath,
+            durationSeconds: durationSecs > 0 ? durationSecs : 10,
+            uploadStatus: 'local',
+          );
+        }
+
         await emitRecordingStatus(
           dueToTimeout
               ? 'Recording stopped after 10 minutes'
@@ -620,7 +683,7 @@ void onStart(ServiceInstance service) async {
               : null,
         );
         await updateServiceNotification(
-          title: 'SafeRoute Active',
+          title: 'VIGIL Active',
           content: idleMonitoringContent(),
         );
       };
@@ -633,6 +696,16 @@ void onStart(ServiceInstance service) async {
       }) async {
         if (isRecording) {
           return true;
+        }
+
+        if (isListening) {
+          try {
+            await speechToText.stop();
+            isListening = false;
+            debugPrint('[SOS Recording] Released speechToText microphone lock.');
+          } catch (e) {
+            debugPrint('[SOS Recording] Error stopping speechToText: $e');
+          }
         }
 
         if (!await recorder.hasPermission()) {
@@ -683,7 +756,7 @@ void onStart(ServiceInstance service) async {
           await updateServiceNotification(
             title: 'SOS audio recording active',
             content:
-                'SafeRoute is recording emergency audio in the background.',
+                'VIGIL is recording emergency audio in the background.',
           );
           recordingTimeoutTimer?.cancel();
           recordingTimeoutTimer = Timer(
@@ -718,7 +791,16 @@ void onStart(ServiceInstance service) async {
     lastVoiceTriggerAt = now;
     isCountdownActive = true;
     isListening = false;
-    await speechToText.stop();
+    currentVoiceState = 'TRIGGERING_SOS';
+
+    // Release microphone lock cleanly before initiating emergency sequence / audio recorder
+    try {
+      await speechToText.stop();
+      await speechToText.cancel();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+    } catch (e) {
+      debugPrint('[Voice SOS] Error releasing mic lock: $e');
+    }
 
     final hasVibrator = await Vibration.hasVibrator();
     if (hasVibrator == true) {
@@ -739,34 +821,39 @@ void onStart(ServiceInstance service) async {
       detail: recognizedWords,
     );
 
-    final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
-    const initializationSettingsAndroid = AndroidInitializationSettings(
-      '@mipmap/ic_launcher',
-    );
-    const initializationSettings = InitializationSettings(
-      android: initializationSettingsAndroid,
-    );
-    await flutterLocalNotificationsPlugin.initialize(
-      settings: initializationSettings,
-    );
+    try {
+      final flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+      const initializationSettingsAndroid = AndroidInitializationSettings(
+        '@mipmap/ic_launcher',
+      );
+      const initializationSettings = InitializationSettings(
+        android: initializationSettingsAndroid,
+      );
+      await flutterLocalNotificationsPlugin.initialize(
+        settings: initializationSettings,
+      );
 
-    await flutterLocalNotificationsPlugin.show(
-      id: 778,
-      title: 'Voice SOS detected',
-      body: 'SafeRoute will trigger SOS in $_voiceCountdownSeconds seconds.',
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'sos_wake_channel_v1',
-          'SOS Critical Wake Lock',
-          channelDescription: 'Voice SOS wake',
-          importance: Importance.max,
-          priority: Priority.max,
-          fullScreenIntent: true,
-          visibility: NotificationVisibility.public,
-          ongoing: true,
+      await flutterLocalNotificationsPlugin.show(
+        id: 778,
+        title: 'Voice SOS detected',
+        body: 'VIGIL will trigger SOS in $_voiceCountdownSeconds seconds.',
+        notificationDetails: const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'sos_wake_channel_v1',
+            'SOS Critical Wake Lock',
+            icon: '@mipmap/ic_launcher',
+            channelDescription: 'Voice SOS wake',
+            importance: Importance.max,
+            priority: Priority.max,
+            fullScreenIntent: true,
+            visibility: NotificationVisibility.public,
+            ongoing: true,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (e) {
+      debugPrint('[Voice SOS] Notification error: $e');
+    }
 
     try {
       await launchUrl(
@@ -783,7 +870,7 @@ void onStart(ServiceInstance service) async {
       final isPending = prefs.getBool('is_sos_pending') ?? false;
       final pendingOwner = prefs.getString(_sosPendingOwnerPrefsKey);
 
-      if (isPending && pendingOwner != 'ui') {
+      if (isPending) {
         final backgroundResult = await _executeBackgroundSOS();
         if (backgroundResult != null) {
           await dispatchBackgroundEmergencySms(
@@ -805,95 +892,178 @@ void onStart(ServiceInstance service) async {
     });
   }
 
-  startVoiceScan = () async {
-    if (!(prefs.getBool(_voiceSosEnabledPrefsKey) ?? false)) {
-      await emitVoiceStatus('Voice SOS disabled', isActive: false);
+  Future<void> restartVoiceListenSession() async {
+    if (isCountdownActive || !(prefs.getBool(_voiceSosEnabledPrefsKey) ?? false)) {
       return;
     }
-
-    if (isCountdownActive || isListening) {
+    if (speechToText.isListening) {
       return;
     }
 
     try {
-      final available = await speechToText.initialize(
-        onStatus: (status) async {
-          debugPrint('[Voice SOS] Listener status: $status');
-          if (status == 'done' || status == 'notListening') {
-            isListening = false;
-            await emitVoiceStatus('Listening for voice SOS...', isActive: true);
-            await Future<void>.delayed(const Duration(seconds: 2));
-            if (!isCountdownActive &&
-                (prefs.getBool(_voiceSosEnabledPrefsKey) ?? false)) {
-              unawaited(startVoiceScan());
-            }
-          }
-        },
-        onError: (errorNotification) async {
-          debugPrint('[Voice SOS] Listener error: $errorNotification');
-          isListening = false;
-          await emitVoiceStatus(
-            'Voice SOS unavailable',
-            isActive: false,
-            detail: errorNotification.errorMsg,
-          );
-          await Future<void>.delayed(const Duration(seconds: 4));
-          if (!isCountdownActive &&
-              (prefs.getBool(_voiceSosEnabledPrefsKey) ?? false)) {
-            unawaited(startVoiceScan());
-          }
-        },
-      );
-
-      if (!available) {
-        await emitVoiceStatus(
-          'Voice SOS unavailable',
-          isActive: false,
-          detail: 'Speech recognition service not available.',
-        );
-        return;
-      }
-
       isListening = true;
+      currentVoiceState = 'LISTENING';
       await emitVoiceStatus('Listening for voice SOS...', isActive: true);
-      await updateServiceNotification(
-        title: 'SafeRoute Active',
-        content: idleMonitoringContent(),
-      );
 
       await speechToText.listen(
         onResult: (result) async {
-          if (isCountdownActive) {
-            return;
-          }
-
           final spokenWords = result.recognizedWords.trim();
-          if (spokenWords.isEmpty) {
-            return;
-          }
-          if (result.hasConfidenceRating &&
-              result.confidence > 0.0 &&
-              result.confidence < 0.55) {
-            return;
-          }
+          if (spokenWords.isEmpty) return;
+
+          lastVoiceTranscript = spokenWords;
+          debugPrint('[Voice SOS] Dictation: "$spokenWords" (final: ${result.finalResult})');
+
+          if (isCountdownActive) return;
 
           if (matchesEmergencyVoicePhrase(spokenWords)) {
+            currentVoiceState = 'KEYWORD_DETECTED';
+            try {
+              await speechToText.stop();
+            } catch (_) {}
             await triggerVoiceSosCountdown(spokenWords);
+          } else {
+            currentVoiceState = 'RECOGNIZING';
           }
         },
+        listenFor: const Duration(seconds: 30),
+        pauseFor: const Duration(seconds: 3),
         listenOptions: SpeechListenOptions(
           listenMode: ListenMode.dictation,
-          partialResults: false,
+          partialResults: true,
+          cancelOnError: false,
+          autoPunctuation: false,
+          enableHapticFeedback: false,
         ),
       );
     } catch (e) {
       isListening = false;
+      currentVoiceState = 'ERROR';
+      lastVoiceError = e.toString();
+      debugPrint('[Voice SOS] Error in restartVoiceListenSession: $e');
+    }
+  }
+
+  startVoiceScan = () async {
+    if (!(prefs.getBool(_voiceSosEnabledPrefsKey) ?? false)) {
+      currentVoiceState = 'DISABLED';
+      await emitVoiceStatus('Voice SOS disabled', isActive: false);
+      return;
+    }
+
+    if (isCountdownActive || speechToText.isListening) {
+      return;
+    }
+
+    try {
+      final micStatus = await Permission.microphone.status;
+      if (!micStatus.isGranted) {
+        final requested = await Permission.microphone.request();
+        if (!requested.isGranted) {
+          currentVoiceState = 'UNAVAILABLE';
+          await emitVoiceStatus(
+            'Voice SOS unavailable',
+            isActive: false,
+            detail: 'Microphone permission not granted.',
+          );
+          return;
+        }
+      }
+
+      // Single-instance initialization to avoid ERROR_RECOGNIZER_BUSY
+      if (!isSpeechToTextInitialized) {
+        currentVoiceState = 'INITIALIZING';
+        final available = await speechToText.initialize(
+          onStatus: (status) async {
+            debugPrint('[Voice SOS] Listener status: $status');
+            if (status == 'listening') {
+              isListening = true;
+              currentVoiceState = 'LISTENING';
+              await emitVoiceStatus('Listening for voice SOS...', isActive: true);
+            } else if (status == 'done' || status == 'notListening') {
+              isListening = false;
+              if (currentVoiceState != 'TRIGGERING_SOS' && currentVoiceState != 'KEYWORD_DETECTED') {
+                currentVoiceState = 'RESTARTING';
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 100));
+              if (!isCountdownActive && (prefs.getBool(_voiceSosEnabledPrefsKey) ?? false)) {
+                unawaited(restartVoiceListenSession());
+              }
+            }
+          },
+          onError: (errorNotification) async {
+            debugPrint('[Voice SOS] Listener error: ${errorNotification.errorMsg}');
+            isListening = false;
+            lastVoiceError = errorNotification.errorMsg;
+
+            final errorStr = errorNotification.errorMsg.toLowerCase();
+            final isBenignSilenceTimeout = errorStr.contains('no_match') ||
+                errorStr.contains('speech_timeout') ||
+                errorStr.contains('timeout') ||
+                errorStr.contains('network_timeout') ||
+                errorStr.contains('client');
+
+            if (isBenignSilenceTimeout) {
+              // Normal silence cycle, seamlessly restart without spamming UI or long exponential backoff
+              if (currentVoiceState != 'TRIGGERING_SOS' && currentVoiceState != 'KEYWORD_DETECTED') {
+                currentVoiceState = 'RESTARTING';
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 100));
+              if (!isCountdownActive && (prefs.getBool(_voiceSosEnabledPrefsKey) ?? false)) {
+                unawaited(restartVoiceListenSession());
+              }
+              return;
+            }
+
+            voiceRestartCount++;
+            if (currentVoiceState != 'TRIGGERING_SOS') {
+              currentVoiceState = 'ERROR';
+            }
+
+            await emitVoiceStatus(
+              'Voice SOS issue: ${errorNotification.errorMsg}',
+              isActive: false,
+              detail: errorNotification.errorMsg,
+            );
+
+            // Controlled cooldown for genuine errors
+            final backoffMs = (400 + (voiceRestartCount % 3) * 300);
+            await Future<void>.delayed(Duration(milliseconds: backoffMs));
+
+            if (!isCountdownActive && (prefs.getBool(_voiceSosEnabledPrefsKey) ?? false)) {
+              unawaited(restartVoiceListenSession());
+            }
+          },
+        );
+
+        if (!available) {
+          currentVoiceState = 'UNAVAILABLE';
+          await emitVoiceStatus(
+            'Voice SOS unavailable',
+            isActive: false,
+            detail: 'Speech recognition service not available.',
+          );
+          return;
+        }
+
+        isSpeechToTextInitialized = true;
+      }
+
+      await updateServiceNotification(
+        title: 'VIGIL Active',
+        content: idleMonitoringContent(),
+      );
+
+      await restartVoiceListenSession();
+    } catch (e) {
+      isListening = false;
+      currentVoiceState = 'ERROR';
+      lastVoiceError = e.toString();
       await emitVoiceStatus(
         'Voice SOS unavailable',
         isActive: false,
         detail: e.toString(),
       );
-      debugPrint("Speech recognizer exception: $e");
+      debugPrint('[Voice SOS] Exception in startVoiceScan: $e');
     }
   };
 
@@ -904,9 +1074,11 @@ void onStart(ServiceInstance service) async {
       } catch (_) {}
     }
     isListening = false;
+    currentVoiceState = 'DISABLED';
+    await emitVoiceStatus('Voice SOS disabled', isActive: false);
     await emitVoiceStatus('Voice SOS disabled', isActive: false);
     await updateServiceNotification(
-      title: 'SafeRoute Active',
+      title: 'VIGIL Active',
       content: idleMonitoringContent(),
     );
   }
@@ -971,6 +1143,7 @@ void onStart(ServiceInstance service) async {
                   android: AndroidNotificationDetails(
                     'sos_nearby_channel_v1',
                     'Nearby SOS Alerts',
+                    icon: '@mipmap/ic_launcher',
                     channelDescription:
                         'Alerts you instantly when a user triggers an emergency nearby.',
                     importance: Importance.max,
@@ -1000,7 +1173,7 @@ void onStart(ServiceInstance service) async {
       detector.reset();
     }
     await updateServiceNotification(
-      title: 'SafeRoute Active',
+      title: 'VIGIL Active',
       content: idleMonitoringContent(),
     );
   });
@@ -1015,7 +1188,7 @@ void onStart(ServiceInstance service) async {
       await stopVoiceScan();
     }
     await updateServiceNotification(
-      title: 'SafeRoute Active',
+      title: 'VIGIL Active',
       content: idleMonitoringContent(),
     );
   });
@@ -1181,7 +1354,7 @@ void onStart(ServiceInstance service) async {
     await emitVoiceStatus('Voice SOS disabled', isActive: false);
   }
   await updateServiceNotification(
-    title: 'SafeRoute Active',
+    title: 'VIGIL Active',
     content: idleMonitoringContent(),
   );
 
@@ -1390,8 +1563,9 @@ class NativeSmsSendResult {
   final String? errorMessage;
 }
 
-class _EmergencyShakeDetector {
+class EmergencyShakeDetector {
   final List<DateTime> _shakeMoments = [];
+  final List<DateTime> _violentSnatchMoments = [];
   int _lastAxisDirection = 0;
   DateTime? _lastShakeAt;
   DateTime? _cooldownUntil;
@@ -1430,8 +1604,26 @@ class _EmergencyShakeDetector {
     _lastAxisDirection = direction;
     _lastShakeAt = now;
     _shakeMoments.add(now);
+
+    // Track sudden violent snatch shocks (e.g. violent physical tug / snatch)
+    if (magnitude >= _violentSnatchMagnitudeThreshold) {
+      _violentSnatchMoments.add(now);
+    }
+
     _prune(now);
 
+    // 1. Violent Snatch & Physical Struggle Condition: >= 2 extreme violent shocks within 700ms
+    if (_violentSnatchMoments.length >= 2) {
+      final snatchDuration = _violentSnatchMoments.last
+          .difference(_violentSnatchMoments.first)
+          .inMilliseconds;
+      if (snatchDuration <= 700) {
+        return true;
+      }
+      _violentSnatchMoments.removeAt(0);
+    }
+
+    // 2. High-Force Intentional Emergency Shake / Struggle: >= 4 strong alternating oscillations within 1700ms
     if (_shakeMoments.length >= _requiredStrongOscillations) {
       final sequenceDuration = _shakeMoments.last
           .difference(_shakeMoments.first)
@@ -1452,6 +1644,7 @@ class _EmergencyShakeDetector {
 
   void reset({bool keepCooldown = false}) {
     _shakeMoments.clear();
+    _violentSnatchMoments.clear();
     _lastAxisDirection = 0;
     _lastShakeAt = null;
     if (!keepCooldown) {
@@ -1463,6 +1656,9 @@ class _EmergencyShakeDetector {
     _shakeMoments.removeWhere(
       (timestamp) =>
           now.difference(timestamp).inMilliseconds > _shakeSequenceWindowMs,
+    );
+    _violentSnatchMoments.removeWhere(
+      (timestamp) => now.difference(timestamp).inMilliseconds > 800,
     );
   }
 

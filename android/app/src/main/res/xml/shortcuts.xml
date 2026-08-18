@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="sos_trigger_shortcut"
+        android:enabled="true"
+        android:icon="@drawable/sos_widget_circle"
+        android:shortcutShortLabel="@string/shortcut_sos_short"
+        android:shortcutLongLabel="@string/shortcut_sos_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.example.safe_route"
+            android:targetClass="com.example.safe_route.SosShortcutActivity">
+            <extra android:name="triggerSource" android:value="shortcut" />
+        </intent>
+    </shortcut>
+</shortcuts>

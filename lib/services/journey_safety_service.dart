@@ -536,17 +536,21 @@ class JourneySafetyService {
   }
 
   static double _severityForZone(UnsafeZone zone) {
+    if (zone.severityScore > 0) {
+      return (zone.severityScore / 10.0).clamp(0.1, 1.0);
+    }
     final normalizedReason = zone.reason?.toLowerCase().trim() ?? '';
-    if (normalizedReason.contains('harassment')) {
-      return 1.0;
+    if (normalizedReason.contains('accident') ||
+        normalizedReason.contains('intersection') ||
+        normalizedReason.contains('harassment')) {
+      return 0.95;
     }
-    if (normalizedReason.contains('isolated')) {
-      return 0.85;
+    if (normalizedReason.contains('isolated') ||
+        normalizedReason.contains('lighting') ||
+        normalizedReason.contains('snatching')) {
+      return 0.80;
     }
-    if (normalizedReason.contains('lighting')) {
-      return 0.65;
-    }
-    return 0.7;
+    return 0.70;
   }
 
   static bool _isPracticalSafeAlternative(

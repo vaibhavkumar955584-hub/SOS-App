@@ -1,7 +1,10 @@
+import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../controllers/auth_controller.dart';
 import '../controllers/contact_controller.dart';
 import '../controllers/history_controller.dart';
@@ -165,7 +168,7 @@ class SosTimerScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('SOS Timer')),
+      appBar: AppBar(title: const Text('SOS Timer & Settings')),
       body: Obx(
         () => ListView(
           padding: const EdgeInsets.all(16),
@@ -188,6 +191,17 @@ class SosTimerScreen extends StatelessWidget {
                 ),
                 subtitle: const Text('Applies to SOS activation delay'),
               ),
+            ),
+            const Divider(),
+            const SizedBox(height: 12),
+            SwitchListTile(
+              value: _settings.isAmbientRecordingConsentGranted.value,
+              onChanged: (val) => _settings.toggleAmbientRecordingConsent(val),
+              title: const Text('Ambient Audio Recording (MIC)', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text(
+                'Record ambient room/surrounding audio via microphone during an active SOS emergency. Disabled by default without disclosure.',
+              ),
+              activeColor: Colors.redAccent,
             ),
           ],
         ),
@@ -229,60 +243,44 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
   Future<void> _loadProfile() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      if (mounted) {
-        setState(() => _loading = false);
+    if (user != null) {
+      _uid = user.uid;
+      _emailController.text = user.email ?? '';
+      _nameController.text = user.displayName ?? '';
+      try {
+        final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+        if (doc.exists) {
+          final data = doc.data();
+          if (data != null) {
+            _nameController.text = data['name']?.toString() ?? user.displayName ?? '';
+            _phoneController.text = data['phone']?.toString() ?? user.phoneNumber ?? '';
+            _photoUrlController.text = data['photoUrl']?.toString() ?? user.photoURL ?? '';
+          }
+        }
+      } catch (e) {
+        debugPrint('Error loading profile: $e');
       }
-      return;
     }
-    final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
-    final data = doc.data() ?? {};
-    _uid = user.uid;
-    _nameController.text = (data['name'] ?? user.displayName ?? '').toString();
-    _phoneController.text = (data['phone'] ?? '').toString();
-    _emailController.text = (data['email'] ?? user.email ?? '').toString();
-    _photoUrlController.text = (data['photoUrl'] ?? user.photoURL ?? '').toString();
-    if (mounted) {
-      setState(() => _loading = false);
-    }
+    if (mounted) setState(() => _loading = false);
   }
 
   Future<void> _saveProfile() async {
     if (!_formKey.currentState!.validate() || _uid == null) return;
+    setState(() => _loading = true);
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(_uid).set({
+        'name': _nameController.text.trim(),
+        'phone': _phoneController.text.trim(),
+        'photoUrl': _photoUrlController.text.trim(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
 
-    final user = FirebaseAuth.instance.currentUser;
-    final newEmail = _emailController.text.trim();
-    final newName = _nameController.text.trim();
-    final newPhone = _phoneController.text.trim();
-    final newPhotoUrl = _photoUrlController.text.trim();
-
-    await FirebaseFirestore.instance.collection('users').doc(_uid).set({
-      'name': newName,
-      'phone': newPhone,
-      'email': newEmail,
-      'photoUrl': newPhotoUrl,
-    }, SetOptions(merge: true));
-
-    var authNote = 'Profile updated successfully';
-    if (user != null) {
-      try {
-        if (user.displayName != newName) {
-          await user.updateDisplayName(newName);
-        }
-        if (newEmail.isNotEmpty && (user.email ?? '') != newEmail) {
-          await user.verifyBeforeUpdateEmail(newEmail);
-          authNote = 'Profile saved. Check your inbox to verify the new email address.';
-        }
-        if ((user.photoURL ?? '') != newPhotoUrl) {
-          await user.updatePhotoURL(newPhotoUrl.isEmpty ? null : newPhotoUrl);
-        }
-      } catch (e) {
-        debugPrint('Profile auth update failed: $e');
-        authNote = 'Profile saved, but some account changes may need re-authentication.';
-      }
+      Get.snackbar('Profile Updated', 'Your profile details have been saved.');
+    } catch (e) {
+      Get.snackbar('Error', 'Failed to update profile: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
-
-    Get.snackbar('Saved', authNote, snackPosition: SnackPosition.BOTTOM);
   }
 
   @override
@@ -291,65 +289,37 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       appBar: AppBar(title: const Text('Edit Profile')),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _uid == null
-              ? const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text('No profile is available until you are signed in.'),
-                  ),
-                )
-              : ListView(
-                  padding: const EdgeInsets.all(16),
+          : Padding(
+              padding: const EdgeInsets.all(16),
+              child: Form(
+                key: _formKey,
+                child: ListView(
                   children: [
-                Center(
-                  child: CircleAvatar(
-                    radius: 44,
-                    backgroundColor: const Color(0xFFEDE7F6),
-                    backgroundImage: _photoUrlController.text.trim().isNotEmpty
-                        ? NetworkImage(_photoUrlController.text.trim())
-                        : null,
-                    child: _photoUrlController.text.trim().isEmpty
-                        ? const Icon(Icons.person, size: 44, color: Colors.deepPurple)
-                        : null,
-                  ),
+                    TextFormField(
+                      controller: _nameController,
+                      decoration: const InputDecoration(labelText: 'Full Name'),
+                      validator: (v) => v == null || v.isEmpty ? 'Required' : null,
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: _phoneController,
+                      decoration: const InputDecoration(labelText: 'Phone Number'),
+                      keyboardType: TextInputType.phone,
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      controller: _emailController,
+                      decoration: const InputDecoration(labelText: 'Email'),
+                      enabled: false,
+                    ),
+                    const SizedBox(height: 24),
+                    ElevatedButton(
+                      onPressed: _saveProfile,
+                      child: const Text('Save Profile'),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 20),
-                Form(
-                  key: _formKey,
-                  child: Column(
-                    children: [
-                      TextFormField(
-                        controller: _nameController,
-                        decoration: const InputDecoration(labelText: 'Name'),
-                        validator: (value) =>
-                            value == null || value.trim().isEmpty ? 'Enter a name' : null,
-                      ),
-                      const SizedBox(height: 12),
-                      TextFormField(
-                        controller: _phoneController,
-                        decoration: const InputDecoration(labelText: 'Phone number'),
-                      ),
-                      const SizedBox(height: 12),
-                      TextFormField(
-                        controller: _emailController,
-                        decoration: const InputDecoration(labelText: 'Email'),
-                        keyboardType: TextInputType.emailAddress,
-                      ),
-                      const SizedBox(height: 12),
-                      TextFormField(
-                        controller: _photoUrlController,
-                        decoration: const InputDecoration(labelText: 'Profile photo URL'),
-                      ),
-                      const SizedBox(height: 20),
-                      FilledButton.icon(
-                        onPressed: _saveProfile,
-                        icon: const Icon(Icons.save),
-                        label: const Text('Save Profile'),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+              ),
             ),
     );
   }
@@ -415,24 +385,173 @@ class HistoryScreen extends StatelessWidget {
                   child: Center(child: Text('No history recorded yet.')),
                 ),
               ...filtered.map(
-                (entry) => Card(
-                  child: ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: _iconColor(entry.type).withOpacity(0.15),
-                      child: Icon(_iconFor(entry.type), color: _iconColor(entry.type)),
+                (entry) {
+                  final hasRecording = entry.recordingFilePath != null && entry.recordingFilePath!.isNotEmpty;
+                  return Card(
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: _iconColor(entry.type).withOpacity(0.15),
+                        child: Icon(_iconFor(entry.type), color: _iconColor(entry.type)),
+                      ),
+                      title: Text(entry.title),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(entry.subtitle),
+                          if (hasRecording)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.mic, size: 14, color: Colors.redAccent),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    'Audio Saved (${entry.recordingDurationSeconds ?? 0}s)',
+                                    style: const TextStyle(fontSize: 11, color: Colors.redAccent, fontWeight: FontWeight.bold),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (hasRecording)
+                            IconButton(
+                              icon: const Icon(Icons.play_circle_fill, color: Colors.redAccent, size: 28),
+                              tooltip: 'Play Ambient Recording',
+                              onPressed: () => _showAudioPlaybackModal(context, entry),
+                            ),
+                          Text(
+                            '${entry.timestamp.hour.toString().padLeft(2, '0')}:${entry.timestamp.minute.toString().padLeft(2, '0')}',
+                            style: const TextStyle(fontSize: 11, color: Colors.grey),
+                          ),
+                        ],
+                      ),
                     ),
-                    title: Text(entry.title),
-                    subtitle: Text(entry.subtitle),
-                    trailing: Text(
-                      '${entry.timestamp.hour.toString().padLeft(2, '0')}:${entry.timestamp.minute.toString().padLeft(2, '0')}',
-                    ),
-                  ),
-                ),
+                  );
+                },
               ),
             ],
           );
         },
       ),
+    );
+  }
+
+  void _showAudioPlaybackModal(BuildContext context, HistoryEntry entry) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        final hasLocalFile = entry.recordingFilePath != null && File(entry.recordingFilePath!).existsSync();
+        final statusLabel = entry.recordingUploadStatus?.toUpperCase() ?? (hasLocalFile ? 'LOCAL' : 'UNAVAILABLE');
+        final durationStr = entry.recordingDurationSeconds != null ? '${entry.recordingDurationSeconds}s' : 'N/A';
+
+        return Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.mic, color: Colors.redAccent, size: 28),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'SOS Ambient Audio Recording',
+                          style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+                        ),
+                        Text(
+                          'SOS ID: ${entry.sosId}',
+                          style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Chip(
+                    label: Text(statusLabel, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
+                    backgroundColor: Colors.red.withOpacity(0.15),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest.withOpacity(0.4),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SelectableText(
+                      'File Path: ${entry.recordingFilePath ?? "None"}',
+                      style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Duration: $durationStr | Trigger: ${entry.triggerSource ?? "sos_event"}',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                    ),
+                    if (entry.remoteRecordingUrl != null) ...[
+                      const SizedBox(height: 4),
+                      SelectableText(
+                        'Cloud URL: ${entry.remoteRecordingUrl}',
+                        style: const TextStyle(fontSize: 11, color: Colors.blue),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: hasLocalFile
+                          ? () async {
+                              final uri = Uri.file(entry.recordingFilePath!);
+                              if (await canLaunchUrl(uri)) {
+                                await launchUrl(uri);
+                              } else {
+                                await Share.shareXFiles(
+                                  [XFile(entry.recordingFilePath!)],
+                                  text: 'SOS Ambient Recording (${entry.sosId})',
+                                );
+                              }
+                            }
+                          : null,
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('Play Audio'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: hasLocalFile
+                          ? () => Share.shareXFiles(
+                                [XFile(entry.recordingFilePath!)],
+                                text: 'SOS Recording (${entry.sosId})',
+                              )
+                          : null,
+                      icon: const Icon(Icons.share_outlined),
+                      label: const Text('Share File'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
@@ -573,7 +692,7 @@ Future<void> showLogoutConfirmation() async {
     AlertDialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       title: const Text('Logout?'),
-      content: const Text('Are you sure you want to sign out of SafeRoute?'),
+      content: const Text('Are you sure you want to sign out of VIGIL?'),
       actions: [
         TextButton(
           onPressed: () => Get.back(result: false),

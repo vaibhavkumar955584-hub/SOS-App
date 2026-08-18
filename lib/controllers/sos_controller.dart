@@ -13,13 +13,18 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../screens/emergency_sos_screen.dart';
+import '../services/emergency_dispatch_engine.dart';
+import '../services/emergency_message_helper.dart';
+import 'package:speech_to_text/speech_to_text.dart';
+import '../services/background_shake_service.dart';
 import 'contact_controller.dart';
 import 'history_controller.dart';
-import 'rescue_invite_controller.dart';
+import 'journey_guard_controller.dart';
 import 'sos_listener_controller.dart';
 import 'sos_settings_controller.dart';
 
-class SosController extends GetxController {
+class SosController extends GetxController with WidgetsBindingObserver {
   static SosController instanceOrCreate() {
     if (Get.isRegistered<SosController>()) {
       return Get.find<SosController>();
@@ -52,6 +57,7 @@ class SosController extends GetxController {
   var isCountdown = false.obs;
   var countdownSeconds = 10.obs; // INCREASED TO 10 SECONDS
   var isSent = false.obs;
+  var isSosModalVisible = false.obs;
   var isActiveBroadcast = false.obs;
   var isCompletingRescue = false.obs;
   var isSendingEmergencyAlerts = false.obs;
@@ -60,6 +66,10 @@ class SosController extends GetxController {
   var isVoiceSOSActive = false.obs;
   var isVoiceListening = false.obs;
   var voiceStatusMessage = 'Voice SOS disabled'.obs;
+  var voiceState = 'IDLE'.obs;
+  var voiceLastTranscript = ''.obs;
+  var voiceRestartCount = 0.obs;
+  var voiceLastError = 'NONE'.obs;
   var isEmergencyRecording = false.obs;
   var recordingStatusMessage = ''.obs;
   var lastRecordingPrivatePath = ''.obs;
@@ -77,17 +87,37 @@ class SosController extends GetxController {
   StreamSubscription<Map<String, dynamic>?>? _voiceStatusSubscription;
   StreamSubscription<Map<String, dynamic>?>? _recordingStatusSubscription;
 
+  final SpeechToText _foregroundSpeech = SpeechToText();
+  bool _isForegroundSpeechInitialized = false;
+  bool _isForegroundListening = false;
+  bool _isVoiceProcessing = false;
+
   @override
   void onInit() {
     super.onInit();
+    WidgetsBinding.instance.addObserver(this);
     _loadPrefs();
     _voiceStatusSubscription = FlutterBackgroundService()
         .on('voice_sos_status')
         .listen((event) {
           final data = Map<String, dynamic>.from(event ?? const {});
-          voiceStatusMessage.value =
-              data['status']?.toString() ?? 'Voice SOS disabled';
-          isVoiceListening.value = data['isActive'] == true;
+          if (!_isForegroundListening) {
+            voiceStatusMessage.value =
+                data['status']?.toString() ?? 'Voice SOS disabled';
+            isVoiceListening.value = data['isActive'] == true;
+          }
+          if (data.containsKey('state') && !_isForegroundListening) {
+            voiceState.value = data['state']?.toString() ?? 'IDLE';
+          }
+          if (data.containsKey('lastTranscript')) {
+            voiceLastTranscript.value = data['lastTranscript']?.toString() ?? '';
+          }
+          if (data.containsKey('restartCount')) {
+            voiceRestartCount.value = (data['restartCount'] as num?)?.toInt() ?? 0;
+          }
+          if (data.containsKey('lastError')) {
+            voiceLastError.value = data['lastError']?.toString() ?? 'NONE';
+          }
         });
     _recordingStatusSubscription = FlutterBackgroundService()
         .on('sos_recording_status')
@@ -108,22 +138,188 @@ class SosController extends GetxController {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(_sosPendingOwnerPrefsKey, 'ui');
         final executeAt = event?['executeAt'];
-        if (executeAt is int) {
-          final remainder =
-              ((executeAt - DateTime.now().millisecondsSinceEpoch) / 1000)
-                  .ceil();
-          initiateSOSWorkflow(initialCountdown: remainder > 0 ? remainder : 3);
-        } else {
-          initiateSOSWorkflow(initialCountdown: 3);
-        }
+        final remainder = (executeAt is int)
+            ? ((executeAt - DateTime.now().millisecondsSinceEpoch) / 1000).ceil()
+            : 3;
+        initiateSOSWorkflow(initialCountdown: remainder > 0 ? remainder : 3);
+
+        // Open the exact same Emergency SOS Screen that opens on manual SOS button tap
+        Get.to(() => const EmergencySosScreen());
       }
     });
   }
 
+  @override
+  void onClose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _stopForegroundVoiceListening();
+    _voiceStatusSubscription?.cancel();
+    _recordingStatusSubscription?.cancel();
+    _timer?.cancel();
+    super.onClose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (isVoiceSOSActive.value && !isCountdown.value && !isSent.value && !isLoading.value && !isActiveBroadcast.value) {
+        _startForegroundVoiceListening();
+      }
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      _stopForegroundVoiceListening();
+    }
+  }
+
+  Future<void> _startForegroundVoiceListening() async {
+    if (!isVoiceSOSActive.value || isCountdown.value || isSent.value || isLoading.value || isActiveBroadcast.value) {
+      return;
+    }
+    if (_isForegroundListening || _foregroundSpeech.isListening) {
+      return;
+    }
+
+    try {
+      final micStatus = await Permission.microphone.status;
+      if (!micStatus.isGranted) {
+        return;
+      }
+
+      if (!_isForegroundSpeechInitialized) {
+        final available = await _foregroundSpeech.initialize(
+          onStatus: (status) async {
+            debugPrint('[Foreground Voice SOS] Status: $status');
+            if (status == 'listening') {
+              _isForegroundListening = true;
+              voiceStatusMessage.value = 'Listening for voice SOS...';
+              isVoiceListening.value = true;
+              voiceState.value = 'LISTENING';
+            } else if (status == 'done' || status == 'notListening') {
+              _isForegroundListening = false;
+              if (voiceState.value != 'KEYWORD_DETECTED') {
+                voiceState.value = 'RESTARTING';
+              }
+              await Future.delayed(const Duration(milliseconds: 150));
+              if (isVoiceSOSActive.value && !isCountdown.value && !isSent.value && !isLoading.value && !isActiveBroadcast.value) {
+                _restartForegroundVoiceListening();
+              }
+            }
+          },
+          onError: (errorNotification) async {
+            debugPrint('[Foreground Voice SOS] Error: ${errorNotification.errorMsg}');
+            _isForegroundListening = false;
+            final errorStr = errorNotification.errorMsg.toLowerCase();
+            final isBenign = errorStr.contains('no_match') ||
+                errorStr.contains('speech_timeout') ||
+                errorStr.contains('timeout') ||
+                errorStr.contains('network_timeout') ||
+                errorStr.contains('client') ||
+                errorStr.contains('busy');
+
+            if (isBenign) {
+              await Future.delayed(const Duration(milliseconds: 150));
+              if (isVoiceSOSActive.value && !isCountdown.value && !isSent.value && !isLoading.value && !isActiveBroadcast.value) {
+                _restartForegroundVoiceListening();
+              }
+            }
+          },
+        );
+
+        if (!available) {
+          debugPrint('[Foreground Voice SOS] Speech recognition not available on this device.');
+          return;
+        }
+        _isForegroundSpeechInitialized = true;
+      }
+
+      await _restartForegroundVoiceListening();
+    } catch (e) {
+      debugPrint('[Foreground Voice SOS] Setup error: $e');
+    }
+  }
+
+  Future<void> _restartForegroundVoiceListening() async {
+    if (!isVoiceSOSActive.value || isCountdown.value || isSent.value || isLoading.value) {
+      return;
+    }
+    if (_foregroundSpeech.isListening) {
+      return;
+    }
+
+    try {
+      _isForegroundListening = true;
+      voiceStatusMessage.value = 'Listening for voice SOS...';
+      isVoiceListening.value = true;
+      voiceState.value = 'LISTENING';
+
+      await _foregroundSpeech.listen(
+        onResult: (result) async {
+          final spokenWords = result.recognizedWords.trim();
+          if (spokenWords.isEmpty) return;
+
+          voiceLastTranscript.value = spokenWords;
+          debugPrint('[Foreground Voice SOS] Heard: "$spokenWords" (final: ${result.finalResult})');
+
+          if (isCountdown.value || isSent.value || _isVoiceProcessing) return;
+
+          if (matchesEmergencyVoicePhrase(spokenWords)) {
+            _isVoiceProcessing = true;
+            voiceState.value = 'KEYWORD_DETECTED';
+            voiceStatusMessage.value = 'Voice SOS keyword detected: "$spokenWords"';
+            try {
+              await _foregroundSpeech.stop();
+            } catch (_) {}
+
+            final hasVibrator = await Vibration.hasVibrator();
+            if (hasVibrator == true) {
+              Vibration.vibrate(pattern: [500, 200, 500, 200, 500]);
+            }
+
+            Get.snackbar(
+              "🚨 Voice SOS Keyword Detected!",
+              'Keyword: "$spokenWords". Triggering Emergency SOS...',
+              snackPosition: SnackPosition.TOP,
+              backgroundColor: Colors.redAccent,
+              colorText: Colors.white,
+              duration: const Duration(seconds: 4),
+            );
+
+            await initiateSOSWorkflow(initialCountdown: 5);
+
+            Future.delayed(const Duration(seconds: 8), () {
+              _isVoiceProcessing = false;
+            });
+          }
+        },
+        listenFor: const Duration(seconds: 30),
+        pauseFor: const Duration(seconds: 3),
+        listenOptions: SpeechListenOptions(
+          listenMode: ListenMode.deviceDefault,
+          partialResults: true,
+          cancelOnError: false,
+          autoPunctuation: false,
+          enableHapticFeedback: false,
+        ),
+      );
+    } catch (e) {
+      debugPrint('[Foreground Voice SOS] listen error: $e');
+    }
+  }
+
+  Future<void> _stopForegroundVoiceListening() async {
+    _isForegroundListening = false;
+    try {
+      if (_foregroundSpeech.isListening) {
+        await _foregroundSpeech.stop();
+      }
+    } catch (_) {}
+  }
+
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    isShakeSOSActive.value = prefs.getBool('is_shake_active') ?? false;
-    isVoiceSOSActive.value = prefs.getBool(_voiceSosPrefsKey) ?? false;
+    isShakeSOSActive.value = prefs.getBool('is_shake_active') ?? true;
+    isVoiceSOSActive.value = prefs.getBool(_voiceSosPrefsKey) ?? true;
     isEmergencyRecording.value =
         prefs.getBool(_recordingActivePrefsKey) ?? false;
     voiceStatusMessage.value =
@@ -160,6 +356,7 @@ class SosController extends GetxController {
 
           if (isFresh) {
             isSent.value = true;
+            isSosModalVisible.value = false;
             isActiveBroadcast.value = true;
             await prefs.setBool(_sosActivePrefsKey, true);
           } else {
@@ -171,7 +368,7 @@ class SosController extends GetxController {
           }
         }
       } catch (e) {
-        debugPrint("Failed to restore SOS state: \$e");
+        debugPrint("Failed to restore SOS state: $e");
       }
     }
 
@@ -185,7 +382,7 @@ class SosController extends GetxController {
         initiateSOSWorkflow(initialCountdown: remainder);
 
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          _showCancelDialogAggressive();
+          // _showCancelDialogAggressive(); // Assumed helper method
         });
       } else {
         await prefs.setBool(_sosPendingPrefsKey, false);
@@ -195,73 +392,13 @@ class SosController extends GetxController {
 
     await refreshSmsSubscriptions();
     await _syncBackgroundMonitoringService();
-  }
-
-  void _showCancelDialogAggressive() {
-    if (Get.isDialogOpen == true) return;
-    Get.defaultDialog(
-      title: "🚨 SOS COUNTDOWN 🚨",
-      titleStyle: const TextStyle(
-        color: Colors.redAccent,
-        fontSize: 24,
-        fontWeight: FontWeight.bold,
-      ),
-      barrierDismissible: false,
-      onWillPop: () async => false, // Prevent physical back buttons
-      content: Obx(
-        () => Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              "Hardware Shake Detected!\nEmergency protocols triggering in:",
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              "${countdownSeconds.value}",
-              style: const TextStyle(
-                fontSize: 64,
-                fontWeight: FontWeight.bold,
-                color: Colors.red,
-              ),
-            ),
-            const SizedBox(height: 20),
-          ],
-        ),
-      ),
-      confirm: ElevatedButton(
-        style: ElevatedButton.styleFrom(
-          backgroundColor: Colors.black,
-          minimumSize: const Size(double.infinity, 50),
-        ),
-        onPressed: () {
-          cancelSOS();
-          if (Get.isDialogOpen == true) Get.back();
-        },
-        child: const Text(
-          "CANCEL SOS",
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 18,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  void onClose() {
-    _timer?.cancel();
-    _voiceStatusSubscription?.cancel();
-    _recordingStatusSubscription?.cancel();
-    super.onClose();
+    if (isVoiceSOSActive.value) {
+      _startForegroundVoiceListening();
+    }
   }
 
   Future<void> toggleShakeSOS(bool value) async {
     isShakeSOSActive.value = value;
-
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('is_shake_active', value);
 
@@ -320,6 +457,15 @@ class SosController extends GetxController {
     isVoiceSOSActive.value = value;
     await prefs.setBool(_voiceSosPrefsKey, value);
 
+    if (value) {
+      await _startForegroundVoiceListening();
+    } else {
+      await _stopForegroundVoiceListening();
+      voiceStatusMessage.value = 'Voice SOS disabled';
+      isVoiceListening.value = false;
+      voiceState.value = 'IDLE';
+    }
+
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid != null) {
       await prefs.setString('user_uid', uid);
@@ -369,12 +515,18 @@ class SosController extends GetxController {
       return;
     }
 
+    await _stopForegroundVoiceListening();
+
     final settings = SosSettingsController.instanceOrCreate();
     final prefs = await SharedPreferences.getInstance();
     countdownSeconds.value =
         initialCountdown ?? settings.activationDelaySeconds.value;
     isSent.value = false;
     await prefs.setString(_sosPendingOwnerPrefsKey, 'ui');
+
+    if (Get.currentRoute != '/EmergencySosScreen') {
+      Get.to(() => const EmergencySosScreen());
+    }
 
     if (countdownSeconds.value <= 0) {
       isCountdown.value = false;
@@ -440,6 +592,14 @@ class SosController extends GetxController {
     await prefs.setBool(_sosPendingPrefsKey, false);
     await prefs.remove(_sosExecuteAtPrefsKey);
     await prefs.remove(_sosPendingOwnerPrefsKey);
+
+    if (isVoiceSOSActive.value) {
+      Future.delayed(const Duration(seconds: 2), () {
+        if (isVoiceSOSActive.value && !isCountdown.value && !isSent.value) {
+          _startForegroundVoiceListening();
+        }
+      });
+    }
   }
 
   Future<void> executeSOS() async {
@@ -502,12 +662,19 @@ class SosController extends GetxController {
 
       // Broadcast SOS to nearby users via Firestore
       final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final String sessionCategory = Get.isRegistered<JourneyGuardController>() &&
+              Get.find<JourneyGuardController>().state.value == JourneyGuardState.activeGuard
+          ? 'journey_guard_sos'
+          : 'emergency_sos';
+
       try {
         await FirebaseFirestore.instance.collection('active_sos').doc(uid).set({
           'sessionId': uid,
           'uid': uid,
           'latitude': position.latitude,
           'longitude': position.longitude,
+          'sessionCategory': sessionCategory,
+          'triggerSource': sessionCategory == 'journey_guard_sos' ? 'journey_guard_deviation' : 'app_button',
           'victim': {
             'lat': position.latitude,
             'lng': position.longitude,
@@ -541,16 +708,25 @@ class SosController extends GetxController {
 
       isLoading.value = false;
       isSent.value = true;
+      isSosModalVisible.value = true;
       isActiveBroadcast.value = true;
       await prefs.setBool(_sosActivePrefsKey, true);
       await _syncBackgroundMonitoringService();
       final backgroundService = FlutterBackgroundService();
-      if (await backgroundService.isRunning()) {
-        backgroundService.invoke('startSosRecording', {'sessionId': uid});
+      if (!await backgroundService.isRunning()) {
+        await backgroundService.startService();
+        await Future<void>.delayed(const Duration(milliseconds: 400));
       }
+      backgroundService.invoke('startSosRecording', {'sessionId': uid});
+
+      final sosId = 'sos_$nowMs';
       await HistoryController.instanceOrCreate().recordSos(
+        sosId: sosId,
         status: 'Sent',
-        locationLabel: 'Emergency SOS dispatched',
+        locationLabel: sessionCategory == 'journey_guard_sos'
+            ? 'Journey Guard Emergency SOS dispatched'
+            : 'Emergency SOS dispatched',
+        triggerSource: 'appButton',
       );
 
       unawaited(
@@ -616,30 +792,11 @@ class SosController extends GetxController {
     required String lng,
     String? sessionId,
   }) async {
-    final victimName = await _resolveVictimName();
-    final timestampLabel = _formatSosTimestamp(DateTime.now());
-    final batteryLevel = await _getBatteryLevel();
-    String? joinLink;
-
-    if (sessionId != null && sessionId.isNotEmpty) {
-      try {
-        final uri = await RescueInviteController.instance
-            .createActiveRescueInviteUri(sessionId: sessionId);
-        joinLink = uri?.toString();
-      } catch (e) {
-        debugPrint('Failed to build rescue invite link for SMS: $e');
-      }
-    }
-
-    final lines = <String>[
-      'EMERGENCY',
-      '$victimName needs help immediately.',
-      if (timestampLabel != null) 'Time: $timestampLabel',
-      if (batteryLevel != null) 'Battery: $batteryLevel%',
-      'Location: https://maps.google.com/?q=$lat,$lng',
-      if (joinLink != null && joinLink.isNotEmpty) 'Join Rescue: $joinLink',
-    ];
-    return lines.join('\n');
+    return EmergencyMessageHelper.buildSosMessage(
+      lat: lat,
+      lng: lng,
+      sessionId: sessionId,
+    );
   }
 
   Future<void> _dispatchEmergencySmsInBackground({
@@ -728,67 +885,6 @@ class SosController extends GetxController {
     } finally {
       isSendingEmergencyAlerts.value = false;
     }
-  }
-
-  Future<String> _resolveVictimName() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      return 'A SafeRoute user';
-    }
-
-    try {
-      final doc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .get();
-      final data = doc.data();
-      final name = data?['name']?.toString().trim();
-      if (name != null && name.isNotEmpty) {
-        return name;
-      }
-    } catch (e) {
-      debugPrint('Failed to resolve SOS victim name: $e');
-    }
-
-    final displayName = user.displayName?.trim();
-    if (displayName != null && displayName.isNotEmpty) {
-      return displayName;
-    }
-
-    return 'A SafeRoute user';
-  }
-
-  String? _formatSosTimestamp(DateTime timestamp) {
-    try {
-      final hour12 = timestamp.hour == 0
-          ? 12
-          : (timestamp.hour > 12 ? timestamp.hour - 12 : timestamp.hour);
-      final suffix = timestamp.hour >= 12 ? 'PM' : 'AM';
-      return '${timestamp.year.toString().padLeft(4, '0')}-'
-          '${timestamp.month.toString().padLeft(2, '0')}-'
-          '${timestamp.day.toString().padLeft(2, '0')} '
-          '${hour12.toString().padLeft(2, '0')}:'
-          '${timestamp.minute.toString().padLeft(2, '0')} '
-          '$suffix';
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<int?> _getBatteryLevel() async {
-    if (!Platform.isAndroid) {
-      return null;
-    }
-
-    try {
-      final level = await _smsChannel.invokeMethod<int>('getBatteryLevel');
-      if (level != null && level >= 0 && level <= 100) {
-        return level;
-      }
-    } catch (e) {
-      debugPrint('Failed to get battery level for SMS: $e');
-    }
-    return null;
   }
 
   Future<_SmsDispatchResult> _sendAutomaticSmsAlerts(
@@ -1038,7 +1134,7 @@ class SosController extends GetxController {
       if (selected != null) {
         Get.snackbar(
           'SMS SIM Updated',
-          'SafeRoute will use ${selected.displayName} for direct SMS.',
+          'VIGIL will use ${selected.displayName} for direct SMS.',
           snackPosition: SnackPosition.BOTTOM,
         );
       }
@@ -1242,7 +1338,7 @@ class SosController extends GetxController {
     try {
       await Share.shareXFiles(
         [XFile(filePath)],
-        subject: 'SafeRoute SOS Recording',
+        subject: 'VIGIL SOS Recording',
         text: 'SOS audio recording',
       );
     } catch (e) {
@@ -1265,28 +1361,39 @@ class SosController extends GetxController {
     final safeName = user?.displayName?.trim();
     final name = (safeName != null && safeName.isNotEmpty)
         ? safeName
-        : 'The SafeRoute user';
+        : 'The VIGIL user';
     await Share.share(
       '$name is safe now. The SOS has been resolved.',
-      subject: 'SafeRoute Update',
+      subject: 'VIGIL Update',
     );
   }
 
   void closeAlert() {
     isSent.value = false;
+    isSosModalVisible.value = false;
     generatedMessage = '';
+  }
+
+  void openSosModal() {
+    isSosModalVisible.value = true;
+    if (Get.currentRoute != '/EmergencySosScreen') {
+      Get.to(() => const EmergencySosScreen());
+    }
   }
 
   Future<void> _clearLocalSosState() async {
     isSent.value = false;
+    isSosModalVisible.value = false;
     isActiveBroadcast.value = false;
     isEmergencyRecording.value = false;
     generatedMessage = '';
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_sosActivePrefsKey, false);
     await prefs.setBool(_sosPendingPrefsKey, false);
-    await prefs.remove(_sosExecuteAtPrefsKey);
     await prefs.remove(_sosPendingOwnerPrefsKey);
+    await prefs.remove(_sosExecuteAtPrefsKey);
+    await prefs.setBool(_recordingActivePrefsKey, false);
+    await EmergencyDispatchEngine.stopAmbientRecording();
     final backgroundService = FlutterBackgroundService();
     if (await backgroundService.isRunning()) {
       backgroundService.invoke('stopSosRecording');
@@ -1377,10 +1484,6 @@ class SosController extends GetxController {
       });
 
       await _clearLocalSosState();
-      await HistoryController.instanceOrCreate().recordSos(
-        status: 'Completed',
-        locationLabel: 'Rescue successfully completed',
-      );
 
       Get.snackbar(
         "Rescue Completed",
@@ -1390,7 +1493,7 @@ class SosController extends GetxController {
         colorText: Colors.white,
       );
     } catch (e) {
-      debugPrint("Error stopping SOS: \$e");
+      debugPrint("Error stopping SOS: $e");
       await _clearLocalSosState();
       Get.snackbar(
         "SOS Stopped Locally",
@@ -1405,10 +1508,7 @@ class SosController extends GetxController {
 
   Future<void> updateVictimLocation(Position position) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null || !isActiveBroadcast.value) {
-      return;
-    }
-
+    if (uid == null) return;
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     try {
       await FirebaseFirestore.instance.collection('active_sos').doc(uid).update(
@@ -1431,7 +1531,6 @@ class SosController extends GetxController {
 
   int? _extractSosTimestampMs(Map<String, dynamic>? data) {
     if (data == null) return null;
-
     final startedAtMs = data['startedAtMs'];
     if (startedAtMs is int) return startedAtMs;
 

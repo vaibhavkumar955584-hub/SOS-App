@@ -12,10 +12,10 @@ void main() {
   testWidgets('basic material scaffold builds', (WidgetTester tester) async {
     await tester.pumpWidget(
       const MaterialApp(
-        home: Scaffold(body: Center(child: Text('SafeRoute'))),
+        home: Scaffold(body: Center(child: Text('VIGIL'))),
       ),
     );
 
-    expect(find.text('SafeRoute'), findsOneWidget);
+    expect(find.text('VIGIL'), findsOneWidget);
   });
 }

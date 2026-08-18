@@ -4,16 +4,23 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../theme/app_colors.dart';
 import '../controllers/auth_controller.dart';
 import '../controllers/contact_controller.dart';
 import '../controllers/history_controller.dart';
+import '../controllers/sos_settings_controller.dart';
 import 'map_screen.dart';
 import 'emergency_sos_screen.dart';
 import 'permissions_onboarding_screen.dart';
 import '../services/pending_action_service.dart';
 import '../controllers/journey_guard_controller.dart';
 import '../controllers/rescue_stats_controller.dart';
+import '../controllers/heatmap_controller.dart';
+import '../controllers/sos_controller.dart';
+import '../services/safety_geofence_service.dart';
+import '../widgets/vigil_brand_header.dart';
 
 class MainShellScreen extends StatefulWidget {
   const MainShellScreen({super.key});
@@ -28,8 +35,46 @@ class _MainShellScreenState extends State<MainShellScreen> {
 
   bool _isCommunityWatchEnabled = false;
   bool _isShakeModeActive = true;
-  bool _isVoiceModeActive = true;
   String _selectedHistoryFilter = 'ALL';
+  DateTime? _lastBackPressTime;
+
+  Future<void> _handleBackPress() async {
+    // 1. If Journey Guard is in search / route selection mode, exit that mode first
+    if (Get.isRegistered<JourneyGuardController>()) {
+      final jg = JourneyGuardController.instanceOrCreate();
+      if (jg.state.value != JourneyGuardState.idle && jg.state.value != JourneyGuardState.activeGuard) {
+        jg.exitDestinationMode();
+        return;
+      }
+    }
+
+    // 2. If user is on a secondary tab (Map, Contacts, History), navigate back to Home (Overview)
+    if (_currentIndex != 0) {
+      setState(() {
+        _currentIndex = 0;
+      });
+      return;
+    }
+
+    // 3. Double-tap back within 2 seconds to exit app safely
+    final now = DateTime.now();
+    if (_lastBackPressTime == null || now.difference(_lastBackPressTime!) > const Duration(seconds: 2)) {
+      _lastBackPressTime = now;
+      Get.snackbar(
+        'Exit VIGIL',
+        'Press back again to exit the app',
+        snackPosition: SnackPosition.BOTTOM,
+        backgroundColor: Colors.black.withValues(alpha: 0.85),
+        colorText: Colors.white,
+        duration: const Duration(seconds: 2),
+        margin: const EdgeInsets.all(16),
+        borderRadius: 12,
+        icon: const Icon(Icons.exit_to_app_rounded, color: AppColors.safetyGreen),
+      );
+    } else {
+      await SystemNavigator.pop();
+    }
+  }
 
   @override
   void initState() {
@@ -149,7 +194,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
 
   void _showProfilePopover(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
-    final userName = user?.displayName?.isNotEmpty == true ? user!.displayName! : (user?.email?.split('@').first ?? 'SafeRoute User');
+    final userName = user?.displayName?.isNotEmpty == true ? user!.displayName! : (user?.email?.split('@').first ?? 'VIGIL User');
     final userEmail = user?.email ?? 'protected@saferoute.app';
     final contactsList = ContactController.instanceOrCreate().contacts;
     final bool hasContacts = contactsList.isNotEmpty;
@@ -453,6 +498,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
     bool shakeTriggerEnabled = true;
     bool silentSmsEnabled = true;
     bool highAccuracyGps = true;
+    final sosSettings = SosSettingsController.instanceOrCreate();
 
     Get.dialog(
       StatefulBuilder(
@@ -461,38 +507,48 @@ class _MainShellScreenState extends State<MainShellScreen> {
             backgroundColor: AppColors.surfaceContainer,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
             title: const Text('App Settings', style: TextStyle(color: AppColors.onSurface, fontFamily: 'Manrope', fontWeight: FontWeight.bold)),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SwitchListTile(
-                  title: const Text('Shake Hardware Sensor', style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
-                  subtitle: const Text('Auto-dispatch SOS on physical shake', style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
-                  value: shakeTriggerEnabled,
-                  activeThumbColor: AppColors.safetyGreen,
-                  onChanged: (val) => setModalState(() => shakeTriggerEnabled = val),
-                ),
-                SwitchListTile(
-                  title: const Text('Silent SIM Hardware SMS', style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
-                  subtitle: const Text('Background dispatch without app popups', style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
-                  value: silentSmsEnabled,
-                  activeThumbColor: AppColors.safetyGreen,
-                  onChanged: (val) => setModalState(() => silentSmsEnabled = val),
-                ),
-                SwitchListTile(
-                  title: const Text('High Accuracy GPS Engine', style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
-                  subtitle: const Text('5-tier real-time fallback active', style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
-                  value: highAccuracyGps,
-                  activeThumbColor: AppColors.safetyGreen,
-                  onChanged: (val) => setModalState(() => highAccuracyGps = val),
-                ),
-              ],
+            content: Obx(
+              () => Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SwitchListTile(
+                    title: const Text('Ambient Audio Recording (MIC)', style: TextStyle(color: AppColors.onSurface, fontSize: 14, fontWeight: FontWeight.bold)),
+                    subtitle: const Text('Record room surroundings via microphone during emergency SOS. Off by default.', style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
+                    value: sosSettings.isAmbientRecordingConsentGranted.value,
+                    activeThumbColor: AppColors.safetyGreen,
+                    onChanged: (val) => sosSettings.toggleAmbientRecordingConsent(val),
+                  ),
+                  const Divider(color: AppColors.borderSubtle),
+                  SwitchListTile(
+                    title: const Text('Shake Hardware Sensor', style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
+                    subtitle: const Text('Auto-dispatch SOS on physical shake', style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
+                    value: shakeTriggerEnabled,
+                    activeThumbColor: AppColors.safetyGreen,
+                    onChanged: (val) => setModalState(() => shakeTriggerEnabled = val),
+                  ),
+                  SwitchListTile(
+                    title: const Text('Silent SIM Hardware SMS', style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
+                    subtitle: const Text('Background dispatch without app popups', style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
+                    value: silentSmsEnabled,
+                    activeThumbColor: AppColors.safetyGreen,
+                    onChanged: (val) => setModalState(() => silentSmsEnabled = val),
+                  ),
+                  SwitchListTile(
+                    title: const Text('High Accuracy GPS Engine', style: TextStyle(color: AppColors.onSurface, fontSize: 14)),
+                    subtitle: const Text('5-tier real-time fallback active', style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
+                    value: highAccuracyGps,
+                    activeThumbColor: AppColors.safetyGreen,
+                    onChanged: (val) => setModalState(() => highAccuracyGps = val),
+                  ),
+                ],
+              ),
             ),
             actions: [
               ElevatedButton(
                 style: ElevatedButton.styleFrom(backgroundColor: AppColors.safetyGreen, foregroundColor: Colors.black),
                 onPressed: () {
                   Get.back();
-                  Get.snackbar('Settings Saved', 'App hardware configurations updated.');
+                  Get.snackbar('Settings Saved', 'App hardware & recording configurations updated.');
                 },
                 child: const Text('Done'),
               ),
@@ -624,122 +680,122 @@ class _MainShellScreenState extends State<MainShellScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: AppColors.background,
-      appBar: AppBar(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        _handleBackPress();
+      },
+      child: Scaffold(
         backgroundColor: AppColors.background,
-        elevation: 0,
-        toolbarHeight: 64,
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                color: AppColors.surfaceContainerHigh,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Icon(Icons.shield_outlined, color: AppColors.safetyGreen, size: 20),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: const BoxDecoration(
-                          color: AppColors.safetyGreen,
-                          shape: BoxShape.circle,
+        appBar: AppBar(
+          backgroundColor: AppColors.background,
+          elevation: 0,
+          toolbarHeight: 64,
+          title: Row(
+            children: [
+              const VigilBrandHeader(logoHeight: 28, showBadgeContainer: true),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: const BoxDecoration(
+                            color: AppColors.safetyGreen,
+                            shape: BoxShape.circle,
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 6),
-                      const Text(
-                        'JOURNEY GUARD ACTIVE',
-                        style: TextStyle(
-                          fontFamily: 'Inter',
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.safetyGreen,
-                          letterSpacing: 0.8,
+                        const SizedBox(width: 6),
+                        const Text(
+                          'JOURNEY GUARD ACTIVE',
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: AppColors.safetyGreen,
+                            letterSpacing: 0.8,
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                  Text(
-                    _getAppBarTitle(),
-                    style: const TextStyle(
-                      fontFamily: 'Manrope',
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.onSurface,
+                      ],
                     ),
+                    Text(
+                      _getAppBarTitle(),
+                      style: const TextStyle(
+                        fontFamily: 'Manrope',
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.onSurface,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              GestureDetector(
+                onTap: () => _showProfilePopover(context),
+                child: Container(
+                  padding: const EdgeInsets.all(2),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: AppColors.safetyGreen, width: 2),
                   ),
-                ],
-              ),
-            ),
-            GestureDetector(
-              onTap: () => _showProfilePopover(context),
-              child: Container(
-                padding: const EdgeInsets.all(2),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: AppColors.safetyGreen, width: 2),
-                ),
-                child: const CircleAvatar(
-                  radius: 18,
-                  backgroundColor: AppColors.surfaceContainerHigh,
-                  child: Icon(Icons.person, color: AppColors.onSurface, size: 20),
+                  child: const CircleAvatar(
+                    radius: 18,
+                    backgroundColor: AppColors.surfaceContainerHigh,
+                    child: Icon(Icons.person, color: AppColors.onSurface, size: 20),
+                  ),
                 ),
               ),
-            ),
+            ],
+          ),
+        ),
+        body: IndexedStack(
+          index: _currentIndex,
+          children: [
+            _buildOverviewTab(),
+            const MapScreen(),
+            _buildContactsTab(),
+            _buildHistoryTab(),
           ],
         ),
-      ),
-      body: IndexedStack(
-        index: _currentIndex,
-        children: [
-          _buildOverviewTab(),
-          const MapScreen(),
-          _buildContactsTab(),
-          _buildHistoryTab(),
-        ],
-      ),
-      bottomNavigationBar: Container(
-        decoration: const BoxDecoration(
-          color: AppColors.surfaceContainerLow,
-          border: Border(top: BorderSide(color: AppColors.borderSubtle, width: 1)),
-        ),
-        child: BottomNavigationBar(
-          currentIndex: _currentIndex,
-          onTap: (index) => setState(() => _currentIndex = index),
-          backgroundColor: AppColors.surfaceContainerLow,
-          selectedItemColor: AppColors.safetyGreen,
-          unselectedItemColor: AppColors.onSurfaceVariant,
-          selectedLabelStyle: const TextStyle(fontFamily: 'Inter', fontSize: 11, fontWeight: FontWeight.bold),
-          unselectedLabelStyle: const TextStyle(fontFamily: 'Inter', fontSize: 11),
-          type: BottomNavigationBarType.fixed,
-          items: const [
-            BottomNavigationBarItem(
-              icon: Icon(Icons.grid_view_rounded),
-              label: 'OVERVIEW',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.explore_outlined),
-              label: 'MAP',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.people_outline),
-              label: 'CONTACTS',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.history_toggle_off),
-              label: 'HISTORY',
-            ),
-          ],
+        bottomNavigationBar: Container(
+          decoration: const BoxDecoration(
+            color: AppColors.surfaceContainerLow,
+            border: Border(top: BorderSide(color: AppColors.borderSubtle, width: 1)),
+          ),
+          child: BottomNavigationBar(
+            currentIndex: _currentIndex,
+            onTap: (index) => setState(() => _currentIndex = index),
+            backgroundColor: AppColors.surfaceContainerLow,
+            selectedItemColor: AppColors.safetyGreen,
+            unselectedItemColor: AppColors.onSurfaceVariant,
+            selectedLabelStyle: const TextStyle(fontFamily: 'Inter', fontSize: 11, fontWeight: FontWeight.bold),
+            unselectedLabelStyle: const TextStyle(fontFamily: 'Inter', fontSize: 11),
+            type: BottomNavigationBarType.fixed,
+            items: const [
+              BottomNavigationBarItem(
+                icon: Icon(Icons.grid_view_rounded),
+                label: 'OVERVIEW',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.explore_outlined),
+                label: 'MAP',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.people_outline),
+                label: 'CONTACTS',
+              ),
+              BottomNavigationBarItem(
+                icon: Icon(Icons.history_toggle_off),
+                label: 'HISTORY',
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -767,65 +823,123 @@ class _MainShellScreenState extends State<MainShellScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // System Status Card
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.surfaceContainer,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: AppColors.borderSubtle, width: 1),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: const [
-                      Text(
-                        'SYSTEM STATUS',
-                        style: TextStyle(
-                          fontFamily: 'Inter',
-                          fontSize: 11,
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.onSurfaceVariant,
-                          letterSpacing: 1.0,
-                        ),
-                      ),
-                      SizedBox(height: 6),
-                      Text(
-                        'All Clear',
-                        style: TextStyle(
-                          fontFamily: 'Manrope',
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                          color: AppColors.safetyGreen,
-                        ),
-                      ),
-                      SizedBox(height: 8),
-                      Text(
-                        'Your local environment and recent routes show no active alerts or anomalies.',
-                        style: TextStyle(
-                          fontFamily: 'Inter',
-                          fontSize: 13,
-                          color: AppColors.onSurfaceVariant,
-                          height: 1.4,
-                        ),
-                      ),
-                    ],
-                  ),
+          // Dynamic System & Zone Safety Status Card
+          Obx(() {
+            final heatmapCtrl = Get.isRegistered<HeatmapController>()
+                ? Get.find<HeatmapController>()
+                : Get.put(HeatmapController());
+
+            final level = heatmapCtrl.currentSafetyLevel.value;
+            final nearestName = heatmapCtrl.nearestZoneName.value;
+            final nearestReason = heatmapCtrl.nearestZoneReason.value;
+            final distM = heatmapCtrl.nearestZoneDistanceMeters.value;
+            final severity = heatmapCtrl.nearestZoneSeverity.value;
+
+            String statusTitle;
+            String statusSubtitle;
+            Color statusColor;
+            Color iconBgColor;
+            IconData statusIcon;
+
+            if (level == SafetyLevel.danger) {
+              statusTitle = 'HIGH DANGER ZONE';
+              statusSubtitle =
+                  '🚨 WARNING: You are inside/near threat zone "$nearestName" (${distM.toStringAsFixed(0)}m away). Risk: $nearestReason (Severity ${severity.toStringAsFixed(1)}/10).';
+              statusColor = AppColors.signalRed;
+              iconBgColor = AppColors.signalRed.withValues(alpha: 0.2);
+              statusIcon = Icons.gpp_maybe_rounded;
+            } else if (level == SafetyLevel.caution) {
+              final distKm = distM / 1000;
+              statusTitle = 'ELEVATED RISK NEARBY';
+              statusSubtitle =
+                  '⚠️ Caution: Approaching $nearestName (${distKm.toStringAsFixed(1)} km away). Reason: $nearestReason.';
+              statusColor = AppColors.warningAmber;
+              iconBgColor = AppColors.warningAmber.withValues(alpha: 0.2);
+              statusIcon = Icons.warning_amber_rounded;
+            } else {
+              statusTitle = 'All Clear';
+              statusSubtitle =
+                  'Your local environment and recent routes show no active alerts or threat zones nearby.';
+              statusColor = AppColors.safetyGreen;
+              iconBgColor = AppColors.safetyGreen.withValues(alpha: 0.15);
+              statusIcon = Icons.shield_rounded;
+            }
+
+            return Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: level == SafetyLevel.danger
+                    ? AppColors.signalRed.withValues(alpha: 0.08)
+                    : (level == SafetyLevel.caution
+                        ? AppColors.warningAmber.withValues(alpha: 0.08)
+                        : AppColors.surfaceContainer),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: level == SafetyLevel.danger
+                      ? AppColors.signalRed.withValues(alpha: 0.4)
+                      : (level == SafetyLevel.caution
+                          ? AppColors.warningAmber.withValues(alpha: 0.4)
+                          : AppColors.borderSubtle),
+                  width: 1.5,
                 ),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: AppColors.primaryContainer.withValues(alpha: 0.15),
-                    shape: BoxShape.circle,
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'SYSTEM STATUS',
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: level == SafetyLevel.danger
+                                ? AppColors.signalRed
+                                : (level == SafetyLevel.caution
+                                    ? AppColors.warningAmber
+                                    : AppColors.onSurfaceVariant),
+                            letterSpacing: 1.0,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          statusTitle,
+                          style: TextStyle(
+                            fontFamily: 'Manrope',
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            color: statusColor,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          statusSubtitle,
+                          style: TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 13,
+                            color: AppColors.onSurfaceVariant,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  child: const Icon(Icons.shield_rounded, color: AppColors.safetyGreen, size: 28),
-                ),
-              ],
-            ),
-          ),
+                  const SizedBox(width: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: iconBgColor,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(statusIcon, color: statusColor, size: 28),
+                  ),
+                ],
+              ),
+            );
+          }),
           const SizedBox(height: 16),
 
           // Total Rescue Counter Showcase Card
@@ -1006,6 +1120,103 @@ class _MainShellScreenState extends State<MainShellScreen> {
           ),
           const SizedBox(height: 16),
 
+          // Live Geofence Engine Monitor Card
+          Obx(() {
+            final geofenceService = Get.isRegistered<SafetyGeofenceService>()
+                ? Get.find<SafetyGeofenceService>()
+                : Get.put(SafetyGeofenceService(), permanent: true);
+
+            final count = geofenceService.activeRegisteredCount.value;
+            final lastLog = geofenceService.lastEventLog.value;
+            final isInside = geofenceService.isInsideHighRiskZone.value;
+            final activeZone = geofenceService.activeZoneWarning.value;
+
+            return Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: isInside
+                    ? AppColors.signalRed.withValues(alpha: 0.12)
+                    : AppColors.surfaceContainer,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: isInside
+                      ? AppColors.signalRed.withValues(alpha: 0.5)
+                      : AppColors.borderSubtle,
+                  width: 1.5,
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        isInside ? Icons.gpp_maybe : Icons.radar_rounded,
+                        color: isInside ? AppColors.signalRed : AppColors.primary,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'NATIVE GEOFENCE ENGINE',
+                        style: TextStyle(
+                          fontFamily: 'Inter',
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.onSurfaceVariant,
+                          letterSpacing: 1.0,
+                        ),
+                      ),
+                      const Spacer(),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: count > 0
+                              ? AppColors.safetyGreen.withValues(alpha: 0.2)
+                              : AppColors.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          count > 0 ? '$count ACTIVE ZONES' : 'STANDBY',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: count > 0 ? AppColors.safetyGreen : AppColors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    isInside && activeZone != null
+                        ? '🚨 Inside High-Risk Geofence: ${activeZone.areaName ?? activeZone.reason ?? "Danger Zone"}'
+                        : (count > 0
+                            ? 'Native Play Services Geofencing active along route corridor.'
+                            : 'Geofence protection will auto-engage when Journey Guard starts.'),
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: isInside ? FontWeight.bold : FontWeight.normal,
+                      color: isInside ? AppColors.signalRed : AppColors.onSurface,
+                    ),
+                  ),
+                  if (lastLog.isNotEmpty && lastLog != 'No events recorded') ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Last Native Event: $lastLog',
+                      style: const TextStyle(
+                        fontFamily: 'RobotoMono',
+                        fontSize: 11,
+                        color: AppColors.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            );
+          }),
+          const SizedBox(height: 16),
+
           // Safety Trigger Modes Section
           const Text(
             'EMERGENCY TRIGGER MODES & HARDWARE CONTROLS',
@@ -1082,66 +1293,143 @@ class _MainShellScreenState extends State<MainShellScreen> {
             },
           ),
 
-          // Voice Detection Mode Card
+          // Voice Detection Mode Card with Diagnostic Telemetry Panel
           StatefulBuilder(
             builder: (context, setModeState) {
-              return Container(
-                margin: const EdgeInsets.only(bottom: 12),
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: AppColors.surfaceContainer,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: AppColors.borderSubtle, width: 1),
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: _isVoiceModeActive ? AppColors.softCyan.withValues(alpha: 0.2) : AppColors.surfaceContainerHigh,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        Icons.mic_rounded,
-                        color: _isVoiceModeActive ? AppColors.softCyan : AppColors.onSurfaceVariant,
-                        size: 22,
-                      ),
+              final sosCtrl = Get.isRegistered<SosController>()
+                  ? Get.find<SosController>()
+                  : Get.put(SosController());
+
+              return Obx(() {
+                final statusMsg = sosCtrl.voiceStatusMessage.value;
+                final stateName = sosCtrl.voiceState.value;
+                final lastTranscript = sosCtrl.voiceLastTranscript.value;
+                final restarts = sosCtrl.voiceRestartCount.value;
+
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceContainer,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: sosCtrl.isVoiceSOSActive.value ? AppColors.softCyan.withValues(alpha: 0.4) : AppColors.borderSubtle,
+                      width: 1.5,
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
                         children: [
-                          const Text(
-                            'Voice Activation Trigger Mode',
-                            style: TextStyle(fontFamily: 'Manrope', fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.onSurface),
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: sosCtrl.isVoiceSOSActive.value ? AppColors.softCyan.withValues(alpha: 0.2) : AppColors.surfaceContainerHigh,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              Icons.mic_rounded,
+                              color: sosCtrl.isVoiceSOSActive.value ? AppColors.softCyan : AppColors.onSurfaceVariant,
+                              size: 22,
+                            ),
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            _isVoiceModeActive ? 'Keywords active: "HELP", "SOS", "SAVIOR"' : 'Disabled • Tap toggle to activate',
-                            style: const TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.onSurfaceVariant),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Text(
+                                      'Voice SOS Engine',
+                                      style: TextStyle(fontFamily: 'Manrope', fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.onSurface),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: stateName == 'LISTENING'
+                                            ? AppColors.safetyGreen.withValues(alpha: 0.2)
+                                            : (stateName == 'KEYWORD_DETECTED'
+                                                ? AppColors.signalRed.withValues(alpha: 0.2)
+                                                : AppColors.surfaceContainerHigh),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Text(
+                                        stateName,
+                                        style: TextStyle(
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.bold,
+                                          color: stateName == 'LISTENING'
+                                              ? AppColors.safetyGreen
+                                              : (stateName == 'KEYWORD_DETECTED'
+                                                  ? AppColors.signalRed
+                                                  : AppColors.onSurfaceVariant),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  sosCtrl.isVoiceSOSActive.value ? statusMsg : 'Disabled • Tap toggle to activate',
+                                  style: const TextStyle(fontFamily: 'Inter', fontSize: 11, color: AppColors.onSurfaceVariant),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Switch(
+                            value: sosCtrl.isVoiceSOSActive.value,
+                            activeThumbColor: AppColors.softCyan,
+                            onChanged: (val) {
+                              sosCtrl.toggleVoiceSOS(val);
+                              Get.snackbar(
+                                val ? 'Voice Trigger Enabled' : 'Voice Trigger Disabled',
+                                val ? 'Voice keywords "HELP", "SOS", "BACHAO" active.' : 'Voice mode turned off.',
+                                snackPosition: SnackPosition.TOP,
+                                backgroundColor: val ? AppColors.softCyan : Colors.orange,
+                                colorText: Colors.black,
+                              );
+                            },
                           ),
                         ],
                       ),
-                    ),
-                    Switch(
-                      value: _isVoiceModeActive,
-                      activeThumbColor: AppColors.softCyan,
-                      onChanged: (val) {
-                        setState(() => _isVoiceModeActive = val);
-                        setModeState(() {});
-                        Get.snackbar(
-                          val ? 'Voice Trigger Enabled' : 'Voice Trigger Disabled',
-                          val ? 'Voice keywords "HELP", "SOS" will trigger emergency.' : 'Voice mode turned off.',
-                          snackPosition: SnackPosition.TOP,
-                          backgroundColor: val ? AppColors.softCyan : Colors.orange,
-                          colorText: Colors.black,
-                        );
-                      },
-                    ),
-                  ],
-                ),
-              );
+                      if (sosCtrl.isVoiceSOSActive.value && lastTranscript.isNotEmpty) ...[
+                        const SizedBox(height: 10),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.graphic_eq, color: AppColors.softCyan, size: 16),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Dictation: "$lastTranscript"',
+                                  style: const TextStyle(
+                                    fontFamily: 'RobotoMono',
+                                    fontSize: 11,
+                                    color: AppColors.onSurface,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                'Resets: $restarts',
+                                style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                );
+              });
             },
           ),
 
@@ -1939,6 +2227,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
                   title: entry.title,
                   timestamp: timeStr,
                   location: entry.subtitle,
+                  entry: entry,
                   isLast: isLast,
                 );
               },
@@ -1955,11 +2244,18 @@ class _MainShellScreenState extends State<MainShellScreen> {
     required String title,
     required String timestamp,
     required String location,
+    HistoryEntry? entry,
     String? badge,
     String? duration,
     bool showMapThumbnail = false,
     bool isLast = false,
   }) {
+    final bool hasRecording = entry != null &&
+        entry.type == 'sos' &&
+        entry.recordingFilePath != null &&
+        entry.recordingFilePath!.isNotEmpty &&
+        File(entry.recordingFilePath!).existsSync();
+
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1976,7 +2272,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
             if (!isLast)
               Container(
                 width: 2,
-                height: showMapThumbnail ? 160 : 70,
+                height: showMapThumbnail ? 160 : (hasRecording ? 100 : 70),
                 color: AppColors.borderSubtle,
               ),
           ],
@@ -2030,6 +2326,23 @@ class _MainShellScreenState extends State<MainShellScreen> {
                     height: 1.3,
                   ),
                 ),
+                if (hasRecording && entry != null) ...[
+                  const SizedBox(height: 10),
+                  ElevatedButton.icon(
+                    onPressed: () => _showAudioPlaybackModal(context, entry),
+                    icon: const Icon(Icons.play_circle_fill, size: 16, color: Colors.black),
+                    label: Text(
+                      'Play Recording (${entry.recordingDurationSeconds != null ? "${entry.recordingDurationSeconds}s" : "Audio"})',
+                      style: const TextStyle(fontFamily: 'Inter', fontSize: 12, fontWeight: FontWeight.bold, color: Colors.black),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.safetyGreen,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  ),
+                ],
                 if (badge != null || duration != null) ...[
                   const SizedBox(height: 10),
                   Row(
@@ -2051,40 +2364,7 @@ class _MainShellScreenState extends State<MainShellScreen> {
                             ),
                           ),
                         ),
-                      if (duration != null) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: AppColors.surfaceContainerHigh,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            duration,
-                            style: const TextStyle(
-                              fontFamily: 'Inter',
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                              color: AppColors.onSurface,
-                            ),
-                          ),
-                        ),
-                      ],
                     ],
-                  ),
-                ],
-                if (showMapThumbnail) ...[
-                  const SizedBox(height: 12),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: Container(
-                      height: 100,
-                      width: double.infinity,
-                      color: const Color(0xFF1E293B),
-                      child: const Center(
-                        child: Icon(Icons.map_outlined, color: Colors.white54, size: 40),
-                      ),
-                    ),
                   ),
                 ],
               ],
@@ -2092,6 +2372,148 @@ class _MainShellScreenState extends State<MainShellScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  void _showAudioPlaybackModal(BuildContext context, HistoryEntry entry) {
+    final effectivePath = (entry.recordingFilePath != null && entry.recordingFilePath!.isNotEmpty && File(entry.recordingFilePath!).existsSync())
+        ? entry.recordingFilePath!
+        : (entry.remoteRecordingUrl ?? '');
+    final hasLocalFile = effectivePath.isNotEmpty && File(effectivePath).existsSync();
+    final statusLabel = entry.recordingUploadStatus?.toUpperCase() ?? (hasLocalFile ? 'LOCAL AVAILABLE' : 'LOCAL SAVED');
+    final durationStr = entry.recordingDurationSeconds != null ? '${entry.recordingDurationSeconds}s' : 'N/A';
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surfaceContainer,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.mic, color: AppColors.signalRed, size: 28),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'SOS Ambient Recording',
+                          style: TextStyle(
+                            fontFamily: 'Manrope',
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.onSurface,
+                          ),
+                        ),
+                        Text(
+                          'ID: ${entry.sosId}',
+                          style: const TextStyle(
+                            fontFamily: 'Inter',
+                            fontSize: 12,
+                            color: AppColors.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: AppColors.primaryContainer.withValues(alpha: 0.3),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      statusLabel,
+                      style: const TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.safetyGreen,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.background,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.borderSubtle),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SelectableText(
+                      'Internal Path: ${effectivePath.isNotEmpty ? effectivePath : "Not saved locally"}',
+                      style: const TextStyle(fontSize: 10, fontFamily: 'Inter', color: AppColors.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      'Downloads Path: ${entry.remoteRecordingUrl?.isNotEmpty == true ? entry.remoteRecordingUrl : (SosController.instanceOrCreate().lastRecordingPublicPath.value.isNotEmpty ? SosController.instanceOrCreate().lastRecordingPublicPath.value : "Saved in Downloads/SafeRoute/SOS_Recordings")}',
+                      style: const TextStyle(fontSize: 10, fontFamily: 'Inter', color: AppColors.safetyGreen, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Duration: $durationStr | Trigger: ${entry.triggerSource ?? "sos_event"}',
+                      style: const TextStyle(fontSize: 11, fontFamily: 'Inter', fontWeight: FontWeight.bold, color: AppColors.onSurface),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: hasLocalFile
+                          ? () async {
+                              final uri = Uri.file(effectivePath);
+                              if (await canLaunchUrl(uri)) {
+                                await launchUrl(uri);
+                              } else {
+                                await Share.shareXFiles(
+                                  [XFile(effectivePath)],
+                                  text: 'SOS Ambient Recording (${entry.sosId})',
+                                );
+                              }
+                            }
+                          : null,
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: const Text('Play Audio'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.safetyGreen,
+                        foregroundColor: Colors.black,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: hasLocalFile
+                          ? () => Share.shareXFiles(
+                                [XFile(effectivePath)],
+                                text: 'SOS Recording (${entry.sosId})',
+                              )
+                          : null,
+                      icon: const Icon(Icons.folder_open_rounded),
+                      label: const Text('Share / Export'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

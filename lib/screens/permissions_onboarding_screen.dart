@@ -103,7 +103,7 @@ class _PermissionsOnboardingScreenState extends State<PermissionsOnboardingScree
               ),
               const SizedBox(height: 8),
               const Text(
-                'SafeRoute requires essential hardware permissions to trigger automatic emergency dispatch, GPS rerouting, and silent SOS calls.',
+                'VIGIL requires essential hardware permissions to trigger automatic emergency dispatch, GPS rerouting, and silent SOS calls.',
                 style: TextStyle(
                   fontFamily: 'Inter',
                   fontSize: 14,

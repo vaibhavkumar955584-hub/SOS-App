@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// SafeRoute Precision Design System - Color Tokens
+/// VIGIL Precision Design System - Color Tokens
 abstract class AppColors {
   // Brand & Safety Status Colors
   static const Color primary = Color(0xFF4BE277);

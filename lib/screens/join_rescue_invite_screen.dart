@@ -107,7 +107,7 @@ class _JoinRescueInviteScreenState extends State<JoinRescueInviteScreen> {
                       const SizedBox(height: 18),
                       _InviteMetaRow(
                         label: 'Invited by',
-                        value: preview.inviterName ?? 'SafeRoute Helper',
+                        value: preview.inviterName ?? 'VIGIL Helper',
                       ),
                       _InviteMetaRow(
                         label: 'Current helpers',
